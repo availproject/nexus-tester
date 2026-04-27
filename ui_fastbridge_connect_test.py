@@ -23,15 +23,58 @@ ARTIFACTS_DIR = WORKSPACE / "fastbridge-report-artifacts"
 ARTIFACTS_DIR.mkdir(exist_ok=True)
 
 RUN_ID = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-REPORT_BUNDLE_DIR = ARTIFACTS_DIR / f"fastbridge-report-{RUN_ID}"
+DESTINATION_SLUG = os.environ.get("FASTBRIDGE_DEST_SLUG", "base").strip().strip("/")
+RUNS_TO_KEEP = 5  # Option C: max timestamped runs kept per chain
+
+# Combined A + B + C layout:
+#
+#   fastbridge-report-artifacts/
+#     history.jsonl              <- B: global one-liner per run, all chains, no screenshots
+#     {slug}-latest/             <- B: freshest run per chain, overwritten each time (has screenshots)
+#       assets/
+#       report.json / report.md / index.html / expectations.html
+#     {slug}/                    <- A: per-chain archive folder
+#       history.jsonl            <- A: per-chain one-liner history, no screenshots
+#       runs/                    <- A+C: up to RUNS_TO_KEEP timestamped full runs kept
+#         {RUN_ID}/
+#           assets/
+#           report.json / report.md / index.html / expectations.html
+
+# B: global history log
+GLOBAL_HISTORY_JSONL_PATH = ARTIFACTS_DIR / "history.jsonl"
+
+# B: {slug}-latest/ — overwrite previous latest for this chain
+LATEST_BUNDLE_DIR = ARTIFACTS_DIR / f"{DESTINATION_SLUG}-latest"
+if LATEST_BUNDLE_DIR.exists():
+    shutil.rmtree(LATEST_BUNDLE_DIR)
+LATEST_BUNDLE_DIR.mkdir(exist_ok=True)
+
+# A: per-chain archive
+CHAIN_DIR = ARTIFACTS_DIR / DESTINATION_SLUG
+CHAIN_RUNS_DIR = CHAIN_DIR / "runs"
+CHAIN_HISTORY_JSONL_PATH = CHAIN_DIR / "history.jsonl"
+CHAIN_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+
+# A: timestamped run bundle (full copy with screenshots)
+REPORT_BUNDLE_DIR = CHAIN_RUNS_DIR / RUN_ID
 REPORT_BUNDLE_DIR.mkdir(exist_ok=True)
+
 ASSETS_DIR = REPORT_BUNDLE_DIR / "assets"
 ASSETS_DIR.mkdir(exist_ok=True)
 JSON_REPORT_PATH = REPORT_BUNDLE_DIR / "report.json"
 MD_REPORT_PATH = REPORT_BUNDLE_DIR / "report.md"
 HTML_REPORT_PATH = REPORT_BUNDLE_DIR / "index.html"
 EXPECTATIONS_HTML_PATH = REPORT_BUNDLE_DIR / "expectations.html"
-DESTINATION_SLUG = os.environ.get("FASTBRIDGE_DEST_SLUG", "base").strip().strip("/")
+
+
+def prune_old_runs(runs_dir: Path, keep: int) -> None:
+    """Option C: delete oldest timestamped run dirs beyond the keep limit."""
+    run_dirs = sorted(
+        [d for d in runs_dir.iterdir() if d.is_dir()],
+        key=lambda d: d.name,
+    )
+    for old_dir in run_dirs[:-keep] if len(run_dirs) > keep else []:
+        shutil.rmtree(old_dir, ignore_errors=True)
 BASE_URL = f"https://fastbridge.availproject.org/{DESTINATION_SLUG}/"
 BRIDGE_AMOUNT = os.environ.get("FASTBRIDGE_BRIDGE_AMOUNT", "0.1").strip()
 STOP_BEFORE_EXECUTION = os.environ.get("FASTBRIDGE_STOP_BEFORE_EXECUTION", "").strip().lower() in {"1", "true", "yes", "quote", "review"}
@@ -2065,6 +2108,56 @@ def main():
     HTML_REPORT_PATH.write_text(build_report_html(result), encoding="utf-8")
     EXPECTATIONS_HTML_PATH.write_text(build_expectations_html(exported), encoding="utf-8")
 
+    # -----------------------------------------------------------------
+    # Option A+B+C: write reports, copy to latest, append histories,
+    # and prune old runs.
+    # -----------------------------------------------------------------
+
+    # Compact history entry — no screenshots, just metrics and outcomes.
+    history_entry = {
+        "runId": exported.get("runId"),
+        "timestampUtc": exported.get("timestampUtc"),
+        "destinationSlug": DESTINATION_SLUG,
+        "destinationName": exported.get("destinationName"),
+        "status": exported.get("status"),
+        "bridgeSuccessful": exported.get("bridgeSuccessful"),
+        "address": exported.get("address"),
+        "bridgeAmount": exported.get("bridgeAmount"),
+        "appUrl": exported.get("appUrl"),
+        "explorerUrl": exported.get("explorerUrl"),
+        "metrics": exported.get("metrics"),
+        "quote": exported.get("quote"),
+        "completion": exported.get("completion"),
+        "balances": exported.get("balances"),
+        "walletInteraction": exported.get("walletInteraction"),
+        "issues": [
+            {"id": i.get("id"), "title": i.get("title"), "severity": i.get("severity")}
+            for i in exported.get("issues", [])
+        ],
+        "checkpoints": [
+            {"label": c.get("label"), "status": c.get("status"), "notes": c.get("notes")}
+            for c in exported.get("checkpoints", [])
+        ],
+        "reportDir": str(REPORT_BUNDLE_DIR),
+        "latestDir": str(LATEST_BUNDLE_DIR),
+    }
+
+    # B: append to global history log (all chains, one file).
+    with GLOBAL_HISTORY_JSONL_PATH.open("a", encoding="utf-8") as fh:  # noqa: E501
+        fh.write(json.dumps(history_entry) + "\n")
+
+    # A: append to per-chain history log.
+    with CHAIN_HISTORY_JSONL_PATH.open("a", encoding="utf-8") as fh:  # noqa: E501
+        fh.write(json.dumps(history_entry) + "\n")
+
+    # B: overwrite {slug}-latest/ with the contents of this run's bundle.
+    if LATEST_BUNDLE_DIR.exists():
+        shutil.rmtree(LATEST_BUNDLE_DIR)
+    shutil.copytree(REPORT_BUNDLE_DIR, LATEST_BUNDLE_DIR)
+
+    # C: prune oldest timestamped run dirs so at most RUNS_TO_KEEP are kept.
+    prune_old_runs(CHAIN_RUNS_DIR, RUNS_TO_KEEP)
+
     print(
         json.dumps(
             {
@@ -2073,6 +2166,10 @@ def main():
                 "markdownReport": str(MD_REPORT_PATH),
                 "htmlReport": str(HTML_REPORT_PATH),
                 "expectationsHtml": str(EXPECTATIONS_HTML_PATH),
+                "globalHistoryLog": str(GLOBAL_HISTORY_JSONL_PATH),
+                "chainHistoryLog": str(CHAIN_HISTORY_JSONL_PATH),
+                "latestBundleDir": str(LATEST_BUNDLE_DIR),
+                "runBundleDir": str(REPORT_BUNDLE_DIR),
             },
             indent=2,
         )
