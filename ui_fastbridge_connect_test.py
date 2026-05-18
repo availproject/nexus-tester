@@ -166,6 +166,18 @@ EXPECTATION_CATALOG = [
         "category": "UI",
         "description": "If a user-facing action fails or the journey is blocked, the app should surface a clear, human-readable explanation and next step.",
     },
+    {
+        "id": "EXP-U04",
+        "name": "Transaction with 25% of available balance",
+        "category": "UI",
+        "description": "A transaction sized at 25% of the available unified balance should complete successfully within 30 seconds.",
+    },
+    {
+        "id": "EXP-U05",
+        "name": "Transaction should be successful when the unified balance deducted from two source chains",
+        "category": "UI",
+        "description": "A transaction is performed with two source chains from unified balance to one destination",
+    },
 ]
 
 INIT_SCRIPT = r"""
@@ -1727,6 +1739,22 @@ def main():
         (step.get("screenshot") for step in step_log if step.get("label") == initial_quote.get("evidenceLabel")),
         after_amount["screenshot"],
     )
+    target_25_percent: Optional[float] = (
+        initial_unified_numeric * 0.25 if initial_unified_numeric else None
+    )
+    bridge_amount_numeric = extract_numeric_amount(BRIDGE_AMOUNT)
+    bridge_amount_matches_25pct = (
+        target_25_percent is not None
+        and bridge_amount_numeric is not None
+        and target_25_percent > 0
+        and abs(bridge_amount_numeric - target_25_percent) / target_25_percent <= 0.05
+    )
+    source_chains_used: List[str] = []
+    raw_sources = completion.get("sourceChains") or ""
+    for piece in re.split(r"\s*(?:,|;|/|\band\b|&|\+)\s*", raw_sources):
+        chain = piece.strip()
+        if chain and chain not in source_chains_used:
+            source_chains_used.append(chain)
 
     if total_usdc and "View Balance Breakdown" in initial["text"]:
         worked.append(f"Unified balance loaded in the live UI and surfaced a total of {total_usdc} USDC.")
@@ -2010,6 +2038,50 @@ def main():
             "name": "Error messages are user-readable",
             "status": "FAIL" if user_facing_error_seen else "PASS",
             "notes": "A user-facing failure banner was shown, but it did not explain the specific cause or recovery path." if user_facing_error_seen else "No user-facing action failure was observed in this run.",
+        },
+        {
+            "id": "EXP-U04",
+            "name": "Transaction with 25% of available balance",
+            "status": (
+                "PASS"
+                if bridge_amount_matches_25pct
+                and bridge_successful
+                and execution_completion_ms is not None
+                and execution_completion_ms <= 30000
+                else "FAIL"
+                if bridge_amount_matches_25pct
+                else "NA"
+            ),
+            "notes": (
+                f"Configured amount {BRIDGE_AMOUNT} USDC matched 25% of available unified balance ({target_25_percent:.4f} USDC); bridge completed in {execution_completion_ms} ms."
+                if bridge_amount_matches_25pct
+                and bridge_successful
+                and execution_completion_ms is not None
+                and execution_completion_ms <= 30000
+                else f"Configured amount {BRIDGE_AMOUNT} USDC matched 25% target ({target_25_percent:.4f} USDC), but bridge did not complete successfully within 30s (measured {execution_completion_ms} ms, success={bridge_successful})."
+                if bridge_amount_matches_25pct
+                else f"Configured amount {BRIDGE_AMOUNT} USDC is not within 5% of 25% of available balance ({target_25_percent:.4f} USDC); set FASTBRIDGE_BRIDGE_AMOUNT accordingly to evaluate."
+                if target_25_percent is not None
+                else "Available unified balance was not captured, so the 25% target could not be computed."
+            ),
+        },
+        {
+            "id": "EXP-U05",
+            "name": "Transaction should be successful when the unified balance deducted from two source chains",
+            "status": (
+                "PASS"
+                if bridge_successful and len(source_chains_used) >= 2
+                else "FAIL"
+                if bridge_successful
+                else "NA"
+            ),
+            "notes": (
+                f"Bridge succeeded and drew from {len(source_chains_used)} source chains: {', '.join(source_chains_used)}."
+                if bridge_successful and len(source_chains_used) >= 2
+                else f"Bridge succeeded but only drew from {len(source_chains_used)} source chain(s): {', '.join(source_chains_used) or 'unknown'}."
+                if bridge_successful
+                else "Run did not complete, so multi-source deduction could not be evaluated."
+            ),
         },
         {
             "id": "EXP-T01",
