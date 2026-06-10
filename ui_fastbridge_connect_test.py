@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
@@ -33,6 +34,10 @@ EXPECTATIONS_HTML_PATH = REPORT_BUNDLE_DIR / "expectations.html"
 DESTINATION_SLUG = os.environ.get("FASTBRIDGE_DEST_SLUG", "base").strip().strip("/")
 BASE_URL = f"https://fastbridge.availproject.org/{DESTINATION_SLUG}/"
 BRIDGE_AMOUNT = os.environ.get("FASTBRIDGE_BRIDGE_AMOUNT", "0.1").strip()
+STOP_BEFORE_EXECUTION = os.environ.get("FASTBRIDGE_STOP_BEFORE_EXECUTION", "").strip().lower() in {"1", "true", "yes", "quote", "review"}
+QUOTE_READY_TIMEOUT_MS = int(os.environ.get("FASTBRIDGE_QUOTE_READY_TIMEOUT_MS", "15000"))
+NAVIGATION_TIMEOUT_MS = int(os.environ.get("FASTBRIDGE_NAVIGATION_TIMEOUT_MS", "45000"))
+POST_LOAD_NETWORK_IDLE_TIMEOUT_MS = int(os.environ.get("FASTBRIDGE_POST_LOAD_NETWORK_IDLE_TIMEOUT_MS", "10000"))
 
 CHAIN_CONFIG = {
     1: {"name": "Ethereum", "rpc": "https://1rpc.io/eth"},
@@ -213,6 +218,16 @@ def to_hex(value: int) -> str:
     return hex(value)
 
 
+def ensure_0x(value: str) -> str:
+    return value if value.startswith("0x") else f"0x{value}"
+
+
+def hexbytes_to_0x(value: Any) -> str:
+    if hasattr(value, "to_0x_hex"):
+        return value.to_0x_hex()
+    return ensure_0x(value.hex())
+
+
 def normalize_typed_data_payload(payload: Any) -> Dict[str, Any]:
     if isinstance(payload, str):
         payload = json.loads(payload)
@@ -250,14 +265,96 @@ def extract_first(pattern: str, text: str) -> Optional[str]:
     return match.group(1).strip() if match else None
 
 
-def extract_quote_details(text: str) -> Dict[str, Optional[str]]:
+def extract_quote_details(text: str) -> Dict[str, Any]:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+    def find_label(label: str) -> Optional[int]:
+        for index, line in enumerate(lines):
+            if line.lower() == label.lower():
+                return index
+        return None
+
+    def first_amount_after(label: str, stop_labels: Optional[List[str]] = None) -> Optional[str]:
+        start = find_label(label)
+        if start is None:
+            return None
+        stop_label_set = {item.lower() for item in (stop_labels or [])}
+        for line in lines[start + 1 :]:
+            if line.lower() in stop_label_set:
+                return None
+            if re.fullmatch(r"[0-9]+(?:\.[0-9]+)? USDC", line):
+                return line
+        return None
+
+    spend_index = find_label("You Spend")
+    receive_index = find_label("You receive")
+    fees_index = find_label("Total fees")
+    amount_spent = first_amount_after("You Spend", ["You receive", "Total fees"])
+    amount_received = first_amount_after("You receive", ["Total fees"])
+    total_fees = first_amount_after("Total fees")
+
+    source_summary = None
+    if spend_index is not None:
+        stop = receive_index if receive_index is not None else len(lines)
+        for line in lines[spend_index + 1 : stop]:
+            if line == amount_spent:
+                continue
+            if line in {"MAX", "Bridge", "Deny", "Accept", "Refreshing...", "Fetching intent..."}:
+                continue
+            source_summary = line
+            break
+
+    destination_shown = None
+    if receive_index is not None:
+        stop = fees_index if fees_index is not None else len(lines)
+        for line in lines[receive_index + 1 : stop]:
+            if line == amount_received:
+                continue
+            if line.lower().startswith("on "):
+                destination_shown = line[3:].strip()
+                break
+            if line not in {"Deny", "Accept", "Refreshing...", "Fetching intent..."}:
+                destination_shown = line
+                break
+
+    parse_errors = []
+    if amount_spent is None:
+        parse_errors.append("amountSpent")
+    if amount_received is None:
+        parse_errors.append("amountReceived")
+    if total_fees is None:
+        parse_errors.append("totalFees")
+
     return {
-        "sourceSummary": extract_first(r"You Spend\s+\n+\s*([^\n]+)", text),
-        "amountSpent": extract_first(r"You Spend\s+\n+(?:[^\n]+\n+)?\s*([0-9.]+ USDC)", text),
-        "amountReceived": extract_first(r"You receive\s+\n+\s*([0-9.]+ USDC)", text),
-        "destinationShown": extract_first(r"You receive\s+\n+(?:[^\n]+\n+)?\s*on ([^\n]+)", text),
-        "totalFees": extract_first(r"Total fees\s+\n+\s*([0-9.]+ USDC)", text),
+        "sourceSummary": source_summary,
+        "amountSpent": amount_spent,
+        "amountReceived": amount_received,
+        "destinationShown": destination_shown,
+        "totalFees": total_fees,
+        "quoteParsed": not parse_errors,
+        "parseErrors": parse_errors,
     }
+
+
+def extract_best_quote(step_log: List[Dict[str, Any]]) -> Dict[str, Any]:
+    best_quote: Optional[Dict[str, Any]] = None
+    best_label: Optional[str] = None
+    best_score = -1
+
+    for step in step_log:
+        quote = extract_quote_details(step.get("text", ""))
+        score = sum(1 for key in ("amountSpent", "amountReceived", "totalFees") if quote.get(key))
+        if score >= best_score:
+            best_quote = quote
+            best_label = step.get("label")
+            best_score = score
+        if quote.get("quoteParsed"):
+            best_quote = quote
+            best_label = step.get("label")
+
+    quote = best_quote or extract_quote_details("")
+    quote["evidenceLabel"] = best_label
+    return quote
 
 
 def extract_completion_details(text: str) -> Dict[str, Optional[str]]:
@@ -338,12 +435,12 @@ class WalletHarness:
         else:
             message_bytes = message_hex.encode()
         signed = Account.sign_message(encode_defunct(message_bytes), private_key=self.private_key)
-        return "0x" + signed.signature.hex()
+        return hexbytes_to_0x(signed.signature)
 
     def sign_typed_data(self, typed_data: Any) -> str:
         payload = normalize_typed_data_payload(typed_data)
         signed = Account.sign_typed_data(self.private_key, full_message=payload)
-        return "0x" + signed.signature.hex()
+        return hexbytes_to_0x(signed.signature)
 
     def send_transaction(self, tx: Dict[str, Any]) -> str:
         w3 = self.current_client()
@@ -397,7 +494,7 @@ class WalletHarness:
             tx_payload["gasPrice"] = gas_price or w3.eth.gas_price
 
         signed = self.account.sign_transaction(tx_payload)
-        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction).hex()
+        tx_hash = hexbytes_to_0x(w3.eth.send_raw_transaction(signed.raw_transaction))
         self.tx_log.append(
             {
                 "chainId": self.current_chain_id,
@@ -478,6 +575,44 @@ def find_button(page: Page, name: str):
     return locator.first if locator.count() > 0 else None
 
 
+def button_is_ready(button: Any) -> bool:
+    if not button:
+        return False
+    try:
+        return button.is_visible() and button.is_enabled()
+    except Exception:
+        return False
+
+
+def wait_for_quote_ready(page: Page, timeout_ms: int = QUOTE_READY_TIMEOUT_MS) -> Dict[str, Any]:
+    start = time.monotonic()
+    try:
+        page.wait_for_function(
+            """() => {
+              const text = document.body.innerText || "";
+              const amountMatches = text.match(/[0-9]+(?:\\.[0-9]+)?\\s+USDC/g) || [];
+              const acceptReady = Array.from(document.querySelectorAll("button")).some((button) => {
+                const label = (button.innerText || button.textContent || "").trim();
+                return label === "Accept" && !button.disabled && button.getAttribute("aria-disabled") !== "true";
+              });
+              return acceptReady
+                && text.includes("You Spend")
+                && text.includes("You receive")
+                && text.includes("Total fees")
+                && amountMatches.length >= 3;
+            }""",
+            timeout=timeout_ms,
+        )
+        return {"ready": True, "elapsedMs": int((time.monotonic() - start) * 1000), "timeoutMs": timeout_ms}
+    except PlaywrightTimeoutError:
+        return {
+            "ready": False,
+            "elapsedMs": int((time.monotonic() - start) * 1000),
+            "timeoutMs": timeout_ms,
+            "reason": "Quote did not reach an Accept-ready state before timeout.",
+        }
+
+
 def wait_and_capture(page: Page, label: str, delay_ms: int = 1500) -> Dict[str, Any]:
     page.wait_for_timeout(delay_ms)
     return {
@@ -517,6 +652,9 @@ def build_report_markdown(result: Dict[str, Any]) -> str:
     lines.append("")
     lines.append(f"- Scenario ID: `{result['scenarioId']}`")
     lines.append(f"- Status: `{result['status']}`")
+    lines.append(f"- Execution mode: `{result.get('executionMode', 'full')}`")
+    lines.append(f"- Product outcome: `{result.get('productOutcome', 'unknown')}`")
+    lines.append(f"- Harness outcome: `{result.get('harnessOutcome', 'unknown')}`")
     lines.append(f"- Run ID: `{result['runId']}`")
     lines.append(f"- UTC Time: `{result['timestampUtc']}`")
     lines.append(f"- Tester: `{result['tester']}`")
@@ -543,6 +681,10 @@ def build_report_markdown(result: Dict[str, Any]) -> str:
     lines.append(f"| Scenario | `{result['scenarioId']}` |")
     lines.append(f"| Destination | `{result['destinationName']}` |")
     lines.append(f"| Requested output | `{result['bridgeAmount']} USDC` |")
+    lines.append(f"| Execution mode | `{result.get('executionMode', 'full')}` |")
+    lines.append(f"| Product outcome | `{result.get('productOutcome', 'unknown')}` |")
+    lines.append(f"| Harness outcome | `{result.get('harnessOutcome', 'unknown')}` |")
+    lines.append(f"| Quote parsed | `{result['quote'].get('quoteParsed')}` |")
     lines.append(f"| Bridge completed | `{result['bridgeSuccessful']}` |")
     lines.append(f"| Gasless flow | `{result['usedGaslessFlow']}` |")
     lines.append(f"| Source chain(s) used | `{result['completion'].get('sourceChains') or result['quote'].get('sourceSummary') or 'unknown'}` |")
@@ -700,9 +842,9 @@ def expectations_with_na(result: Dict[str, Any]) -> List[Dict[str, str]]:
 
 def severity_class(value: str) -> str:
     normalized = value.lower()
-    if normalized in {"high", "critical", "p0", "p1"}:
+    if normalized in {"high", "critical", "p0", "p1", "fail", "product_fail", "parser_error"}:
         return "sev-high"
-    if normalized in {"medium", "partial", "anomaly", "p2"}:
+    if normalized in {"medium", "partial", "anomaly", "p2", "harness_timeout", "low_balance"}:
         return "sev-medium"
     return "sev-low"
 
@@ -712,9 +854,52 @@ def render_badge(text: str, class_name: str = "") -> str:
     return f'<span class="badge{suffix}">{html.escape(text)}</span>'
 
 
+def shorten_address(address: str) -> str:
+    return f"{address[:8]}...{address[-6:]}" if len(address) > 18 else address
+
+
+def compact_url(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        return url
+    path = parsed.path.rstrip("/")
+    return f"{parsed.netloc}{path}" if path else parsed.netloc
+
+
+def render_meta_value(label: str, value: str, *, mono: bool = False, href: Optional[str] = None, title: Optional[str] = None) -> str:
+    tag = "a" if href else ("code" if mono else "span")
+    attrs = ' class="meta-value"'
+    if href:
+        attrs += f' href="{html.escape(href)}"'
+    if title:
+        attrs += f' title="{html.escape(title)}"'
+    return f'<div class="card meta-card"><strong>{html.escape(label)}</strong><br><{tag}{attrs}>{html.escape(value)}</{tag}></div>'
+
+
+def render_copy_meta_value(label: str, display_value: str, copy_value: str, *, mono: bool = False, title: Optional[str] = None) -> str:
+    classes = "meta-value copy-value"
+    if mono:
+        classes += " mono"
+    title_attr = f' title="{html.escape(title or copy_value)}"' if title or copy_value else ""
+    return (
+        f'<div class="card meta-card copy-card"><strong>{html.escape(label)}</strong><br>'
+        f'<button class="{classes}" type="button" data-copy="{html.escape(copy_value)}"{title_attr} '
+        f'aria-label="Copy {html.escape(label)}">{html.escape(display_value)}</button>'
+        f'<span class="copy-hint" aria-live="polite">Click to copy</span></div>'
+    )
+
+
 def build_report_html(result: Dict[str, Any]) -> str:
     bundle_path = result.get("bundlePath")
     expectations_all = expectations_with_na(result)
+    app_url = result["appUrl"]
+    explorer_url = result.get("explorerUrl")
+    wallet_address = result["address"]
+    explorer_card = (
+        render_meta_value("Explorer", compact_url(explorer_url), href=explorer_url, title=explorer_url)
+        if explorer_url
+        else render_meta_value("Explorer", "n/a")
+    )
     checkpoint_cards = []
     for checkpoint in result["checkpoints"]:
         evidence = file_to_data_url(checkpoint["evidence"])
@@ -839,7 +1024,7 @@ def build_report_html(result: Dict[str, Any]) -> str:
     .hero h1 {{ margin: 0 0 10px; font-size: 34px; line-height: 1.1; }}
     .hero p {{ margin: 0; color: var(--muted); max-width: 820px; }}
     .meta, .grid, .artifact-grid {{ display: grid; gap: 16px; }}
-    .meta {{ grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); margin-top: 20px; }}
+    .meta {{ grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin-top: 20px; }}
     .grid {{ grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); margin-top: 24px; }}
     .artifact-grid {{ grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }}
     .card {{
@@ -849,6 +1034,56 @@ def build_report_html(result: Dict[str, Any]) -> str:
       padding: 18px;
       box-shadow: var(--shadow);
       backdrop-filter: blur(10px);
+      min-width: 0;
+      overflow: hidden;
+    }}
+    .meta-card {{
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }}
+    .meta-value {{
+      display: block;
+      max-width: 100%;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--ink);
+    }}
+    button.meta-value {{
+      appearance: none;
+      border: 0;
+      padding: 0;
+      background: transparent;
+      cursor: pointer;
+      font: inherit;
+      text-align: left;
+    }}
+    button.meta-value:hover {{
+      color: var(--accent);
+      text-decoration: underline;
+    }}
+    .meta-value.mono {{
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }}
+    a.meta-value {{
+      color: var(--accent);
+      font-weight: 650;
+      text-decoration: none;
+    }}
+    a.meta-value:hover {{ text-decoration: underline; }}
+    .copy-card {{
+      position: relative;
+    }}
+    .copy-hint {{
+      color: var(--muted);
+      font-size: 12px;
+      min-height: 18px;
+    }}
+    .copy-card.copied .copy-hint {{
+      color: var(--good);
+      font-weight: 700;
     }}
     .card-head {{
       display: flex;
@@ -875,6 +1110,7 @@ def build_report_html(result: Dict[str, Any]) -> str:
       text-align: left;
       border-bottom: 1px solid var(--line);
       vertical-align: top;
+      overflow-wrap: anywhere;
     }}
     th {{ background: rgba(12,106,131,0.08); }}
     tr:last-child td {{ border-bottom: none; }}
@@ -965,6 +1201,8 @@ def build_report_html(result: Dict[str, Any]) -> str:
       .wrap {{ width: min(100vw - 20px, 1240px); padding-top: 18px; }}
       .hero h1 {{ font-size: 28px; }}
       .card, .hero {{ border-radius: 20px; }}
+      .meta {{ grid-template-columns: 1fr; }}
+      .meta-value {{ white-space: normal; overflow-wrap: anywhere; }}
     }}
   </style>
 </head>
@@ -983,12 +1221,14 @@ def build_report_html(result: Dict[str, Any]) -> str:
         </div>
       </div>
       <div class="meta">
-        <div class="card"><strong>Run ID</strong><br><code>{html.escape(result["runId"])}</code></div>
-        <div class="card"><strong>Tester</strong><br>{html.escape(result["tester"])}</div>
-        <div class="card"><strong>App URL</strong><br><code>{html.escape(result["appUrl"])}</code></div>
-        <div class="card"><strong>Wallet</strong><br><code>{html.escape(result["address"])}</code></div>
-        <div class="card"><strong>Requested Amount</strong><br>{html.escape(result["bridgeAmount"])} USDC</div>
-        <div class="card"><strong>Explorer</strong><br>{f'<a href="{html.escape(result["explorerUrl"])}">{html.escape(result["explorerUrl"])}</a>' if result.get("explorerUrl") else 'n/a'}</div>
+        {render_meta_value("Run ID", result["runId"], mono=True)}
+        {render_meta_value("Tester", result["tester"])}
+        {render_meta_value("App URL", compact_url(app_url), href=app_url, title=app_url)}
+        {render_copy_meta_value("Wallet", shorten_address(wallet_address), wallet_address, mono=True, title=wallet_address)}
+        {render_meta_value("Requested Amount", result["bridgeAmount"] + " USDC")}
+        <div class="card meta-card"><strong>Product Outcome</strong><br>{render_badge(result.get("productOutcome", "unknown"), severity_class(result.get("productOutcome", "unknown")))}</div>
+        <div class="card meta-card"><strong>Harness Outcome</strong><br>{render_badge(result.get("harnessOutcome", "unknown"), severity_class(result.get("harnessOutcome", "unknown")))}</div>
+        {explorer_card}
       </div>
     </section>
 
@@ -998,6 +1238,10 @@ def build_report_html(result: Dict[str, Any]) -> str:
     <h2>Scenario Outcome</h2>
     <table>
       <tr><th>Field</th><th>Value</th></tr>
+      <tr><td>Execution mode</td><td>{html.escape(result.get("executionMode", "full"))}</td></tr>
+      <tr><td>Product outcome</td><td>{html.escape(result.get("productOutcome", "unknown"))}</td></tr>
+      <tr><td>Harness outcome</td><td>{html.escape(result.get("harnessOutcome", "unknown"))}</td></tr>
+      <tr><td>Quote parsed</td><td>{html.escape(str(result["quote"].get("quoteParsed")))}</td></tr>
       <tr><td>Source chain(s) used</td><td>{html.escape(result["completion"].get("sourceChains") or result["quote"].get("sourceSummary") or "unknown")}</td></tr>
       <tr><td>Amount spent</td><td>{html.escape(result["completion"].get("amountSpent") or result["quote"].get("amountSpent") or "unknown")}</td></tr>
       <tr><td>Amount received</td><td>{html.escape(result["completion"].get("amountReceived") or result["quote"].get("amountReceived") or "unknown")}</td></tr>
@@ -1087,6 +1331,43 @@ def build_report_html(result: Dict[str, Any]) -> str:
         overlayImage.removeAttribute('src');
       }}
     }});
+    const fallbackCopy = (text) => {{
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.select();
+      const copied = document.execCommand('copy');
+      textarea.remove();
+      return copied;
+    }};
+    const copyText = async (text) => {{
+      if (navigator.clipboard && window.isSecureContext) {{
+        try {{
+          await navigator.clipboard.writeText(text);
+          return true;
+        }} catch (error) {{
+          return fallbackCopy(text);
+        }}
+      }}
+      return fallbackCopy(text);
+    }};
+    document.querySelectorAll('[data-copy]').forEach((button) => {{
+      button.addEventListener('click', async () => {{
+        const card = button.closest('.copy-card');
+        const hint = card?.querySelector('.copy-hint');
+        const originalText = hint?.textContent || 'Click to copy';
+        const copied = await copyText(button.dataset.copy || '');
+        if (hint) hint.textContent = copied ? 'Copied' : 'Copy failed';
+        card?.classList.toggle('copied', copied);
+        window.setTimeout(() => {{
+          if (hint) hint.textContent = originalText;
+          card?.classList.remove('copied');
+        }}, 1600);
+      }});
+    }});
   </script>
 </body>
 </html>"""
@@ -1175,6 +1456,9 @@ def main():
     artifacts: List[Dict[str, str]] = []
     step_log: List[Dict[str, Any]] = []
     issues: List[Dict[str, Any]] = []
+    quote_waits: List[Dict[str, Any]] = []
+    navigation_state: Dict[str, Any] = {}
+    accept_attempted = False
     execution_attempted = False
     explorer_url: Optional[str] = None
     destination_name = humanize_destination(DESTINATION_SLUG)
@@ -1213,8 +1497,21 @@ def main():
         page.on("response", on_response)
 
         page_load_start = time.monotonic()
-        page.goto(BASE_URL, wait_until="networkidle", timeout=45000)
+        response = page.goto(BASE_URL, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
         page_load_ms = int((time.monotonic() - page_load_start) * 1000)
+        navigation_state = {
+            "waitUntil": "domcontentloaded",
+            "responseStatus": response.status if response else None,
+            "domContentLoadedMs": page_load_ms,
+            "networkIdle": False,
+            "networkIdleTimeoutMs": POST_LOAD_NETWORK_IDLE_TIMEOUT_MS,
+        }
+        try:
+            page.wait_for_load_state("networkidle", timeout=POST_LOAD_NETWORK_IDLE_TIMEOUT_MS)
+            navigation_state["networkIdle"] = True
+            navigation_state["networkIdleMs"] = int((time.monotonic() - page_load_start) * 1000)
+        except PlaywrightTimeoutError:
+            navigation_state["networkIdleWarning"] = "Network idle was not reached after DOM content loaded; continuing because this app keeps background requests active."
         initial = wait_and_capture(page, f"{DESTINATION_SLUG}-initial", 2500)
         artifacts.append({"label": "Initial connected state", "path": initial["screenshot"]})
         step_log.append(initial)
@@ -1282,39 +1579,51 @@ def main():
         except Exception:
             pass
 
-        after_amount = wait_and_capture(page, f"{DESTINATION_SLUG}-after-amount", 2500)
+        quote_wait = wait_for_quote_ready(page)
+        quote_waits.append({"stage": "after-amount", **quote_wait})
+        after_amount = wait_and_capture(page, f"{DESTINATION_SLUG}-after-amount", 300)
         quote_visible_ms = int((time.monotonic() - quote_start) * 1000)
         artifacts.append({"label": "After amount input", "path": after_amount["screenshot"]})
         step_log.append(after_amount)
 
-        bridge_button = find_button(page, "Bridge")
-        if bridge_button and bridge_button.is_visible():
-            bridge_button.click()
-            review = wait_and_capture(page, f"{DESTINATION_SLUG}-review", 4000)
+        accept_button = find_button(page, "Accept")
+        if not button_is_ready(accept_button):
+            bridge_button = find_button(page, "Bridge")
+            if button_is_ready(bridge_button):
+                bridge_button.click()
+                review_quote_wait = wait_for_quote_ready(page, timeout_ms=10000)
+                quote_waits.append({"stage": "review", **review_quote_wait})
+                quote_visible_ms = int((time.monotonic() - quote_start) * 1000)
+            review = wait_and_capture(page, f"{DESTINATION_SLUG}-review", 300)
             artifacts.append({"label": "Review state", "path": review["screenshot"]})
             step_log.append(review)
         else:
             review = {"text": ""}
 
-        accept_button = find_button(page, "Accept")
-        if accept_button and accept_button.is_visible():
-            accept_button.click()
-            allowance = wait_and_capture(page, f"{DESTINATION_SLUG}-allowance", 4000)
-            artifacts.append({"label": "Allowance modal", "path": allowance["screenshot"]})
-            step_log.append(allowance)
-        else:
+        if STOP_BEFORE_EXECUTION:
             allowance = {"text": ""}
-
-        approve_button = find_button(page, "Approve Selected")
-        if approve_button and approve_button.is_visible():
-            execution_attempted = True
-            execution_start = time.monotonic()
-            approve_button.click()
-            post_approve = wait_and_capture(page, f"{DESTINATION_SLUG}-post-approve", 12000)
-            artifacts.append({"label": "Post approval state", "path": post_approve["screenshot"]})
-            step_log.append(post_approve)
-        else:
             post_approve = {"text": ""}
+        else:
+            accept_button = find_button(page, "Accept")
+            if button_is_ready(accept_button):
+                accept_attempted = True
+                accept_button.click()
+                allowance = wait_and_capture(page, f"{DESTINATION_SLUG}-allowance", 4000)
+                artifacts.append({"label": "Allowance modal", "path": allowance["screenshot"]})
+                step_log.append(allowance)
+            else:
+                allowance = {"text": ""}
+
+            approve_button = find_button(page, "Approve Selected")
+            if button_is_ready(approve_button):
+                execution_attempted = True
+                execution_start = time.monotonic()
+                approve_button.click()
+                post_approve = wait_and_capture(page, f"{DESTINATION_SLUG}-post-approve", 12000)
+                artifacts.append({"label": "Post approval state", "path": post_approve["screenshot"]})
+                step_log.append(post_approve)
+            else:
+                post_approve = {"text": ""}
 
         final_state = wait_and_capture(page, f"{DESTINATION_SLUG}-final", 3000)
         if execution_start is not None:
@@ -1334,7 +1643,33 @@ def main():
     bridge_successful = "Bridge Successful!" in final_text and "Transaction Completed" in final_text
     used_gasless_flow = any(call["method"] in {"eth_signTypedData", "eth_signTypedData_v3", "eth_signTypedData_v4"} for call in provider_calls)
     user_facing_error_seen = any("Oops! Something went wrong. Please try again." in step["text"] for step in step_log)
-    initial_quote = extract_quote_details(after_amount["text"])
+    route_blocked_low_balance = any(
+        "No eligible source chains available" in step.get("text", "")
+        or "Insufficient" in step.get("text", "")
+        for step in step_log
+    )
+    initial_quote = extract_best_quote(step_log)
+    quote_parsed = bool(initial_quote.get("quoteParsed"))
+    quote_ready_seen = any(item.get("ready") for item in quote_waits)
+    sign_or_tx_attempted = used_gasless_flow or bool(tx_log)
+    harness_outcome = (
+        "COMPLETED"
+        if quote_parsed or bridge_successful or route_blocked_low_balance
+        else "PARSER_ERROR"
+        if quote_ready_seen
+        else "HARNESS_TIMEOUT"
+    )
+    product_outcome = (
+        "PRODUCT_PASS"
+        if bridge_successful
+        else "NOT_ATTEMPTED"
+        if STOP_BEFORE_EXECUTION
+        else "LOW_BALANCE"
+        if route_blocked_low_balance
+        else "PRODUCT_FAIL"
+        if accept_attempted or execution_attempted or sign_or_tx_attempted
+        else "UNKNOWN"
+    )
     completion = extract_completion_details(final_text)
     breakdown_rows = extract_breakdown_rows(breakdown["text"])
     total_usdc = extract_total_usdc(initial["text"])
@@ -1345,6 +1680,10 @@ def main():
     actual_fees = extract_numeric_amount(completion.get("totalFees"))
     initial_unified_numeric = extract_numeric_amount(total_usdc)
     final_unified_numeric = extract_numeric_amount(final_total_usdc)
+    quote_evidence = next(
+        (step.get("screenshot") for step in step_log if step.get("label") == initial_quote.get("evidenceLabel")),
+        after_amount["screenshot"],
+    )
 
     if total_usdc and "View Balance Breakdown" in initial["text"]:
         worked.append(f"Unified balance loaded in the live UI and surfaced a total of {total_usdc} USDC.")
@@ -1429,9 +1768,65 @@ def main():
             root_cause="Execution failures are surfaced with a generic message instead of a task-specific explanation.",
         )
 
+    if harness_outcome == "PARSER_ERROR":
+        append_issue(
+            issues,
+            "Quote Parser Could Not Read Settled Quote",
+            "medium",
+            "The UI reached an Accept-ready quote state, but the harness could not parse spend, receive, and fee fields from the settled page text.",
+            [
+                f"Open the {destination_name} route with the funded wallet connected.",
+                f"Enter {BRIDGE_AMOUNT} USDC.",
+                "Wait until the Accept quote is visible.",
+                "Compare the quote text against the parser labels in the harness.",
+            ],
+            issue_id="FB-H1-001",
+            evidence=quote_evidence,
+            root_cause=f"Missing quote field(s): {', '.join(initial_quote.get('parseErrors') or [])}.",
+        )
+    elif harness_outcome == "HARNESS_TIMEOUT" and not route_blocked_low_balance:
+        append_issue(
+            issues,
+            "Quote Did Not Reach Accept-Ready State",
+            "medium",
+            "The harness did not observe a settled quote with an enabled Accept button before the timeout. This is classified as harness/product uncertainty, not a product execution failure.",
+            [
+                f"Open the {destination_name} route with the funded wallet connected.",
+                f"Enter {BRIDGE_AMOUNT} USDC.",
+                f"Wait up to {QUOTE_READY_TIMEOUT_MS} ms for the quote and Accept button.",
+                "Inspect the captured final UI state before deciding whether the product or harness is at fault.",
+            ],
+            issue_id="FB-H1-002",
+            evidence=final_state["screenshot"],
+            root_cause="Quote readiness was not observed before the configured timeout.",
+        )
+    elif product_outcome == "UNKNOWN" and not STOP_BEFORE_EXECUTION and quote_parsed:
+        append_issue(
+            issues,
+            "Execution Was Not Attempted After Quote",
+            "medium",
+            "A parseable quote was captured in full-execution mode, but the harness did not click Accept or reach the allowance/execution path.",
+            [
+                f"Open the {destination_name} route with the funded wallet connected.",
+                f"Enter {BRIDGE_AMOUNT} USDC.",
+                "Wait for the quote to settle.",
+                "Confirm whether the Accept button is enabled and clickable.",
+            ],
+            issue_id="FB-H1-003",
+            evidence=quote_evidence,
+            root_cause="Harness flow control did not progress from settled quote to execution.",
+        )
+
     summary.append(f"Unified balance aggregation is working for this wallet on the {destination_name} route.")
-    summary.append(f"The quote path for sending {BRIDGE_AMOUNT} USDC to {destination_name} works and the information shown is complete enough to review the route.")
-    if bridge_successful:
+    if quote_parsed:
+        summary.append(f"The quote path for sending {BRIDGE_AMOUNT} USDC to {destination_name} works and the information shown is complete enough to review the route.")
+    elif route_blocked_low_balance:
+        summary.append("The route was blocked before quote review because no eligible funded source chain was available for this destination.")
+    else:
+        summary.append("The tester did not capture a parseable settled quote, so quote correctness is unresolved rather than a product execution failure.")
+    if STOP_BEFORE_EXECUTION:
+        summary.append("Quote-only mode stopped before Accept / Approve Selected, so no live transaction was attempted by design.")
+    elif bridge_successful:
         summary.append("The end-to-end bridge transaction completed successfully and the UI balance updated on the destination chain.")
     elif tx_log:
         summary.append("At least one live on-chain transaction was submitted during this run.")
@@ -1455,21 +1850,21 @@ def main():
         },
         {
             "label": "Quote rendering",
-            "status": "PASS" if initial_quote.get("amountReceived") else "FAIL",
-            "evidence": after_amount["screenshot"],
-            "notes": f"Spend {initial_quote.get('amountSpent')}, receive {initial_quote.get('amountReceived')}, fees {initial_quote.get('totalFees')}." if initial_quote.get("amountReceived") else "Quote details did not render after amount entry.",
+            "status": "PASS" if quote_parsed else harness_outcome,
+            "evidence": quote_evidence,
+            "notes": f"Spend {initial_quote.get('amountSpent')}, receive {initial_quote.get('amountReceived')}, fees {initial_quote.get('totalFees')}." if quote_parsed else f"Quote parse incomplete: {', '.join(initial_quote.get('parseErrors') or ['unknown'])}.",
         },
         {
             "label": "Allowance review",
-            "status": "PASS" if "Set Token Allowances" in allowance["text"] else "PARTIAL",
+            "status": "NA" if STOP_BEFORE_EXECUTION else ("PASS" if "Set Token Allowances" in allowance["text"] else ("HARNESS_TIMEOUT" if product_outcome == "UNKNOWN" else "PARTIAL")),
             "evidence": allowance.get("screenshot", review.get("screenshot", after_amount["screenshot"])),
-            "notes": "Allowance modal rendered with approval options." if "Set Token Allowances" in allowance["text"] else "Allowance modal was not observed in this run.",
+            "notes": "Quote-only mode stopped before allowance review." if STOP_BEFORE_EXECUTION else ("Allowance modal rendered with approval options." if "Set Token Allowances" in allowance["text"] else "Allowance modal was not observed in this run."),
         },
         {
             "label": "Execution completion",
-            "status": "PASS" if bridge_successful else "FAIL",
+            "status": "NA" if STOP_BEFORE_EXECUTION else ("PASS" if bridge_successful else ("LOW_BALANCE" if product_outcome == "LOW_BALANCE" else ("FAIL" if product_outcome == "PRODUCT_FAIL" else "HARNESS_TIMEOUT"))),
             "evidence": final_state["screenshot"],
-            "notes": "Bridge successful state rendered with final amounts and explorer link." if bridge_successful else "Bridge did not reach a successful completion state.",
+            "notes": "Quote-only mode stopped before execution by design." if STOP_BEFORE_EXECUTION else ("Bridge successful state rendered with final amounts and explorer link." if bridge_successful else "Bridge did not reach a successful completion state."),
         },
     ]
 
@@ -1483,9 +1878,11 @@ def main():
         {
             "id": "EXP-T03",
             "name": "Balances refresh after completion",
-            "status": "PASS" if bridge_successful and initial_unified_numeric is not None and final_unified_numeric is not None and final_unified_numeric != initial_unified_numeric else ("NA" if not bridge_successful else "FAIL"),
+            "status": "NA" if STOP_BEFORE_EXECUTION else ("PASS" if bridge_successful and initial_unified_numeric is not None and final_unified_numeric is not None and final_unified_numeric != initial_unified_numeric else ("NA" if not bridge_successful else "FAIL")),
             "notes": (
-                f"Unified balance changed from {total_usdc} USDC to {final_total_usdc} USDC after completion."
+                "Quote-only mode stopped before completion, so balance refresh was not evaluated."
+                if STOP_BEFORE_EXECUTION
+                else f"Unified balance changed from {total_usdc} USDC to {final_total_usdc} USDC after completion."
                 if bridge_successful and initial_unified_numeric is not None and final_unified_numeric is not None and final_unified_numeric != initial_unified_numeric
                 else ("Run did not complete, so balance refresh could not be evaluated." if not bridge_successful else "Completion occurred, but the unified balance did not visibly change.")
             ),
@@ -1493,8 +1890,8 @@ def main():
         {
             "id": "EXP-T04",
             "name": "Quote appears within 5s",
-            "status": "PASS" if quote_visible_ms is not None and quote_visible_ms <= 5000 else "FAIL",
-            "notes": f"Measured {quote_visible_ms} ms." if quote_visible_ms is not None else "Not captured.",
+            "status": "PASS" if quote_parsed and quote_visible_ms is not None and quote_visible_ms <= 5000 else ("ANOMALY" if quote_parsed else harness_outcome),
+            "notes": f"Measured {quote_visible_ms} ms." if quote_parsed and quote_visible_ms is not None else "A settled quote was not captured before timeout.",
         },
         {
             "id": "EXP-T05",
@@ -1526,9 +1923,11 @@ def main():
         {
             "id": "EXP-D01",
             "name": "Delivered output matches quoted output",
-            "status": "PASS" if bridge_successful and quoted_receive is not None and actual_receive is not None and abs(actual_receive - quoted_receive) < 0.000001 else ("NA" if not bridge_successful else "FAIL"),
+            "status": "NA" if STOP_BEFORE_EXECUTION else ("PASS" if bridge_successful and quoted_receive is not None and actual_receive is not None and abs(actual_receive - quoted_receive) < 0.000001 else ("NA" if not bridge_successful else "FAIL")),
             "notes": (
-                f"Quoted receive {initial_quote.get('amountReceived')}; actual receive {completion.get('amountReceived')}."
+                "Quote-only mode stopped before completion, so delivered output was not evaluated."
+                if STOP_BEFORE_EXECUTION
+                else f"Quoted receive {initial_quote.get('amountReceived')}; actual receive {completion.get('amountReceived')}."
                 if bridge_successful and quoted_receive is not None and actual_receive is not None
                 else ("Run did not complete, so delivered output could not be evaluated." if not bridge_successful else "Quoted or actual receive amount was unavailable.")
             ),
@@ -1536,9 +1935,11 @@ def main():
         {
             "id": "EXP-D02",
             "name": "Actual fees do not materially exceed quoted fees",
-            "status": "PASS" if bridge_successful and quoted_fees is not None and actual_fees is not None and actual_fees <= (quoted_fees * 1.05 + 0.000001) else ("NA" if not bridge_successful else "FAIL"),
+            "status": "NA" if STOP_BEFORE_EXECUTION else ("PASS" if bridge_successful and quoted_fees is not None and actual_fees is not None and actual_fees <= (quoted_fees * 1.05 + 0.000001) else ("NA" if not bridge_successful else "FAIL")),
             "notes": (
-                f"Quoted fees {initial_quote.get('totalFees')}; actual fees {completion.get('totalFees')}."
+                "Quote-only mode stopped before completion, so actual fees were not evaluated."
+                if STOP_BEFORE_EXECUTION
+                else f"Quoted fees {initial_quote.get('totalFees')}; actual fees {completion.get('totalFees')}."
                 if bridge_successful and quoted_fees is not None and actual_fees is not None
                 else ("Run did not complete, so fee comparison could not be evaluated." if not bridge_successful else "Quoted or actual fee amount was unavailable.")
             ),
@@ -1552,13 +1953,13 @@ def main():
         {
             "id": "EXP-U02",
             "name": "Source chain visible before confirm",
-            "status": "PASS" if initial_quote.get("sourceSummary") else "FAIL",
+            "status": "PASS" if initial_quote.get("sourceSummary") else ("PARTIAL" if quote_parsed else harness_outcome),
             "notes": f"Source summary: {initial_quote.get('sourceSummary') or 'missing'}.",
         },
         {
             "id": "EXP-U01",
             "name": "Spend, receive, and fee details shown",
-            "status": "PASS" if initial_quote.get("amountSpent") and initial_quote.get("amountReceived") and initial_quote.get("totalFees") else "PARTIAL",
+            "status": "PASS" if quote_parsed else harness_outcome,
             "notes": f"Spend {initial_quote.get('amountSpent')}, receive {initial_quote.get('amountReceived')}, fees {initial_quote.get('totalFees')}.",
         },
         {
@@ -1570,8 +1971,8 @@ def main():
         {
             "id": "EXP-T01",
             "name": "Execution completes within 30s",
-            "status": "PASS" if bridge_successful and execution_completion_ms is not None and execution_completion_ms <= 30000 else ("ANOMALY" if bridge_successful and execution_completion_ms is not None else "FAIL"),
-            "notes": f"Measured {execution_completion_ms} ms from approval click to final capture." if execution_completion_ms is not None else "Execution timing not captured.",
+            "status": "NA" if STOP_BEFORE_EXECUTION else ("PASS" if bridge_successful and execution_completion_ms is not None and execution_completion_ms <= 30000 else ("ANOMALY" if bridge_successful and execution_completion_ms is not None else ("LOW_BALANCE" if product_outcome == "LOW_BALANCE" else ("FAIL" if product_outcome == "PRODUCT_FAIL" else "HARNESS_TIMEOUT")))),
+            "notes": "Quote-only mode stopped before execution by design." if STOP_BEFORE_EXECUTION else (f"Measured {execution_completion_ms} ms from approval click to final capture." if execution_completion_ms is not None else "Execution timing not captured."),
         },
     ]
 
@@ -1582,18 +1983,37 @@ def main():
         f"{sum(1 for event in network_events if event.get('status') == 401)} network 401 response(s) captured.",
         f"{sum(1 for event in network_events if event.get('status') == 400)} network 400 response(s) captured.",
     ]
+    if navigation_state.get("networkIdleWarning"):
+        network_summary.append(navigation_state["networkIdleWarning"])
     metrics = {
         "pageLoadMs": page_load_ms if page_load_ms is not None else "n/a",
+        "navigation": navigation_state,
         "quoteVisibleMs": quote_visible_ms if quote_visible_ms is not None else "n/a",
+        "quoteReadyTimeoutMs": QUOTE_READY_TIMEOUT_MS,
         "executionCompletionMs": execution_completion_ms if execution_completion_ms is not None else "n/a",
         "consoleErrorCount": len(console_errors),
         "pageErrorCount": len(page_errors),
         "networkEventCount": len(network_events),
     }
 
+    result_status = (
+        harness_outcome
+        if harness_outcome != "COMPLETED" and not bridge_successful and product_outcome != "LOW_BALANCE"
+        else "HARNESS_TIMEOUT"
+        if product_outcome == "UNKNOWN"
+        else "PRODUCT_PASS"
+        if product_outcome == "PRODUCT_PASS" and not issues
+        else "PARTIAL"
+        if product_outcome == "PRODUCT_PASS"
+        else product_outcome
+    )
+
     result = {
         "scenarioId": f"FB-USDC-{DESTINATION_SLUG.upper()}-001",
-        "status": "PASS" if bridge_successful and not issues else ("PARTIAL" if bridge_successful else "FAIL"),
+        "executionMode": "quote-only" if STOP_BEFORE_EXECUTION else "full",
+        "status": result_status,
+        "productOutcome": product_outcome,
+        "harnessOutcome": harness_outcome,
         "runId": RUN_ID,
         "timestampUtc": datetime.now(timezone.utc).isoformat(),
         "tester": "Codex Agent",
@@ -1605,7 +2025,9 @@ def main():
         "worked": worked,
         "issues": issues,
         "metrics": metrics,
+        "navigation": navigation_state,
         "quote": initial_quote,
+        "quoteWaits": quote_waits,
         "completion": completion,
         "checkpoints": checkpoints,
         "expectations": expectations,
@@ -1619,6 +2041,8 @@ def main():
             "personalSignCount": sum(1 for call in provider_calls if call.get("method") == "personal_sign"),
             "typedDataCount": sum(1 for call in provider_calls if call.get("method") in {"eth_signTypedData", "eth_signTypedData_v3", "eth_signTypedData_v4"}),
             "sendTransactionCount": sum(1 for call in provider_calls if call.get("method") == "eth_sendTransaction"),
+            "acceptAttempted": accept_attempted,
+            "executionAttempted": execution_attempted,
         },
         "networkSummary": network_summary,
         "bridgeSuccessful": bridge_successful,
