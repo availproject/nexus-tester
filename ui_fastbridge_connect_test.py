@@ -33,6 +33,7 @@ EXPECTATIONS_HTML_PATH = REPORT_BUNDLE_DIR / "expectations.html"
 DESTINATION_SLUG = os.environ.get("FASTBRIDGE_DEST_SLUG", "base").strip().strip("/")
 BASE_URL = f"https://fastbridge.availproject.org/{DESTINATION_SLUG}/"
 BRIDGE_AMOUNT = os.environ.get("FASTBRIDGE_BRIDGE_AMOUNT", "0.1").strip()
+IDLE_INIT_TEST = os.environ.get("FASTBRIDGE_TEST_IDLE_INIT", "").strip().lower() in {"1", "true", "yes"}
 
 CHAIN_CONFIG = {
     1: {"name": "Ethereum", "rpc": "https://1rpc.io/eth"},
@@ -129,6 +130,30 @@ EXPECTATION_CATALOG = [
         "name": "Transaction should be successful when the unified balance deducted from two source chains",
         "category": "UI",
         "description": "A transaction is performed with two source chains from unified balance to one destination",
+    },
+    {
+        "id": "EXP-U06",
+        "name": "Transaction with single source worth $4.1",
+        "category": "UI",
+        "description": "Transaction should be successful within 30s and its intent explorer should bear 'Mayan' label",
+    },
+    {
+        "id": "EXP-U07",
+        "name": "Transaction with multiple sources worth $4.1",
+        "category": "UI",
+        "description": "Transaction should be successful within 30s and its intent explorer should bear 'Mayan' label",
+    },
+    {
+        "id": "EXP-E01",
+        "name": "fastbridge and connected to wallet",
+        "category": "Error handling",
+        "description": "Once the wallet is connected to fastbridge, browser console should not show 'Unable to fetch deployment from middleware'",
+    },
+    {
+        "id": "EXP-E02",
+        "name": "fastbridge and connected to wallet",
+        "category": "Error handling",
+        "description": "Once the wallet is connected to fastbridge and is kept idle for more than 30 seconds, it should show error message 'Nexus initialization timed out after 30 seconds'",
     },
 ]
 
@@ -1231,6 +1256,24 @@ def main():
         artifacts.append({"label": "Initial connected state", "path": initial["screenshot"]})
         step_log.append(initial)
 
+        idle_timeout_message_seen: Optional[bool] = None
+        idle_capture_text: Optional[str] = None
+        if IDLE_INIT_TEST:
+            # EXP-E02: idle the connected page for >30s and verify the Nexus
+            # initialization timeout error surfaces.
+            page.wait_for_timeout(35000)
+            idle_capture = wait_and_capture(page, f"{DESTINATION_SLUG}-idle-30s", 500)
+            artifacts.append({"label": "Idle state after 30s", "path": idle_capture["screenshot"]})
+            step_log.append(idle_capture)
+            idle_capture_text = idle_capture["text"]
+            idle_timeout_message_seen = (
+                "Nexus initialization timed out after 30 seconds" in idle_capture_text
+                or any(
+                    "Nexus initialization timed out after 30 seconds" in err.get("text", "")
+                    for err in console_errors
+                )
+            )
+
         if "Initializing..." in initial["text"]:
             append_issue(
                 issues,
@@ -1373,6 +1416,19 @@ def main():
         chain = piece.strip()
         if chain and chain not in source_chains_used:
             source_chains_used.append(chain)
+
+    bridge_amount_matches_4_1 = (
+        bridge_amount_numeric is not None and abs(bridge_amount_numeric - 4.1) <= 0.1
+    )
+    mayan_label_visible = (
+        "Mayan" in final_text
+        or any("Mayan" in step.get("text", "") for step in step_log)
+        or (explorer_url is not None and "mayan" in explorer_url.lower())
+    )
+    middleware_deployment_error_count = sum(
+        1 for err in console_errors
+        if "Unable to fetch deployment from middleware" in err.get("text", "")
+    )
 
     if total_usdc and "View Balance Breakdown" in initial["text"]:
         worked.append(f"Unified balance loaded in the live UI and surfaced a total of {total_usdc} USDC.")
@@ -1637,6 +1693,102 @@ def main():
                 else f"Bridge succeeded but only drew from {len(source_chains_used)} source chain(s): {', '.join(source_chains_used) or 'unknown'}."
                 if bridge_successful
                 else "Run did not complete, so multi-source deduction could not be evaluated."
+            ),
+        },
+        {
+            "id": "EXP-U06",
+            "name": "Transaction with single source worth $4.1",
+            "status": (
+                "PASS"
+                if bridge_amount_matches_4_1
+                and bridge_successful
+                and len(source_chains_used) == 1
+                and execution_completion_ms is not None
+                and execution_completion_ms <= 30000
+                and mayan_label_visible
+                else "FAIL"
+                if bridge_amount_matches_4_1
+                else "NA"
+            ),
+            "notes": (
+                f"Single source ({source_chains_used[0] if source_chains_used else 'unknown'}) bridged {BRIDGE_AMOUNT} USDC in {execution_completion_ms} ms; Mayan label observed."
+                if bridge_amount_matches_4_1
+                and bridge_successful
+                and len(source_chains_used) == 1
+                and execution_completion_ms is not None
+                and execution_completion_ms <= 30000
+                and mayan_label_visible
+                else (
+                    f"Amount matched $4.1 target ({BRIDGE_AMOUNT} USDC) but conditions failed: "
+                    f"success={bridge_successful}, "
+                    f"sources={len(source_chains_used)} ({', '.join(source_chains_used) or 'unknown'}), "
+                    f"completion_ms={execution_completion_ms}, "
+                    f"mayan_label={mayan_label_visible}."
+                )
+                if bridge_amount_matches_4_1
+                else f"Configured amount {BRIDGE_AMOUNT} USDC is not within $0.1 of the $4.1 target; set FASTBRIDGE_BRIDGE_AMOUNT=4.1 to evaluate."
+            ),
+        },
+        {
+            "id": "EXP-U07",
+            "name": "Transaction with multiple sources worth $4.1",
+            "status": (
+                "PASS"
+                if bridge_amount_matches_4_1
+                and bridge_successful
+                and len(source_chains_used) >= 2
+                and execution_completion_ms is not None
+                and execution_completion_ms <= 30000
+                and mayan_label_visible
+                else "FAIL"
+                if bridge_amount_matches_4_1
+                else "NA"
+            ),
+            "notes": (
+                f"Multi-source ({', '.join(source_chains_used)}) bridged {BRIDGE_AMOUNT} USDC in {execution_completion_ms} ms; Mayan label observed."
+                if bridge_amount_matches_4_1
+                and bridge_successful
+                and len(source_chains_used) >= 2
+                and execution_completion_ms is not None
+                and execution_completion_ms <= 30000
+                and mayan_label_visible
+                else (
+                    f"Amount matched $4.1 target ({BRIDGE_AMOUNT} USDC) but conditions failed: "
+                    f"success={bridge_successful}, "
+                    f"sources={len(source_chains_used)} ({', '.join(source_chains_used) or 'unknown'}), "
+                    f"completion_ms={execution_completion_ms}, "
+                    f"mayan_label={mayan_label_visible}."
+                )
+                if bridge_amount_matches_4_1
+                else f"Configured amount {BRIDGE_AMOUNT} USDC is not within $0.1 of the $4.1 target; set FASTBRIDGE_BRIDGE_AMOUNT=4.1 to evaluate."
+            ),
+        },
+        {
+            "id": "EXP-E01",
+            "name": "fastbridge and connected to wallet",
+            "status": "FAIL" if middleware_deployment_error_count > 0 else "PASS",
+            "notes": (
+                f"Console emitted 'Unable to fetch deployment from middleware' {middleware_deployment_error_count} time(s) after wallet connection."
+                if middleware_deployment_error_count > 0
+                else "No 'Unable to fetch deployment from middleware' error observed in the console after wallet connection."
+            ),
+        },
+        {
+            "id": "EXP-E02",
+            "name": "fastbridge and connected to wallet",
+            "status": (
+                "PASS"
+                if idle_timeout_message_seen is True
+                else "FAIL"
+                if idle_timeout_message_seen is False
+                else "NA"
+            ),
+            "notes": (
+                "After 35s of idle, 'Nexus initialization timed out after 30 seconds' was surfaced."
+                if idle_timeout_message_seen is True
+                else "After 35s of idle, the expected 'Nexus initialization timed out after 30 seconds' error did not appear."
+                if idle_timeout_message_seen is False
+                else "Idle-init test not exercised this run; set FASTBRIDGE_TEST_IDLE_INIT=true to evaluate."
             ),
         },
         {
