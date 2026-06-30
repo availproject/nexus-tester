@@ -5,3 +5,10 @@ __pycache__/
 .cursor/
 .env
 .idea/
+
+# Playwright browser cache (downloaded per-machine by `playwright install`)
+.playwright-browsers/
+
+# Local test run artifacts
+fastbridge-report-artifacts/
+debug-assets-*.png
