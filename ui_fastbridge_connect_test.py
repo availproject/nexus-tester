@@ -42,7 +42,7 @@ STANDARD_EXPECTATION_IDS = {
     "EXP-U05",
 }
 
-SCENARIO_ORDER = ["default", "EXP-U06", "EXP-U07", "EXP-E01", "EXP-E02"]
+SCENARIO_ORDER = ["default", "EXP-U06", "EXP-U07", "EXP-U08", "EXP-U09", "EXP-U10", "EXP-U11", "EXP-E01", "EXP-E02"]
 
 SCENARIOS: Dict[str, Dict[str, Any]] = {
     "default": {
@@ -72,6 +72,54 @@ SCENARIOS: Dict[str, Dict[str, Any]] = {
         "skip_balance_asset_setup": True,
         "in_scope": {"EXP-U07"},
         "bundle_suffix": "-exp-u07",
+    },
+    "EXP-U08": {
+        "scenario_id": lambda dest: "FB-EXP-U08-001",
+        "bridge_amount": None,
+        "idle_init": False,
+        "run_bridge_flow": False,
+        "check_base_usdc_source_amount": True,
+        "source_amount": "0.1",
+        "skip_balance_asset_setup": True,
+        "in_scope": {"EXP-U08"},
+        "bundle_suffix": "-exp-u08",
+    },
+    "EXP-U09": {
+        "scenario_id": lambda dest: "FB-EXP-U09-001",
+        "bridge_amount": None,
+        "idle_init": False,
+        "run_bridge_flow": False,
+        "check_bridging_token_flow": True,
+        "source_amount": "0.1",
+        "skip_balance_asset_setup": True,
+        "in_scope": {"EXP-U09"},
+        "bundle_suffix": "-exp-u09",
+    },
+    "EXP-U10": {
+        "scenario_id": lambda dest: "FB-EXP-U10-001",
+        "bridge_amount": None,
+        "idle_init": False,
+        "run_bridge_flow": False,
+        "check_bridge_execution_flow": True,
+        "source_token": "USDC",
+        "receive_token": "ETH",
+        "source_amount": "0.1",
+        "skip_balance_asset_setup": True,
+        "in_scope": {"EXP-U10"},
+        "bundle_suffix": "-exp-u10",
+    },
+    "EXP-U11": {
+        "scenario_id": lambda dest: "FB-EXP-U11-001",
+        "bridge_amount": None,
+        "idle_init": False,
+        "run_bridge_flow": False,
+        "check_bridge_execution_flow": True,
+        "source_token": "ETH",
+        "receive_token": "USDC",
+        "source_amount": "0.0001",
+        "skip_balance_asset_setup": True,
+        "in_scope": {"EXP-U11"},
+        "bundle_suffix": "-exp-u11",
     },
     "EXP-E01": {
         "scenario_id": lambda dest: "FB-EXP-E01-001",
@@ -106,6 +154,8 @@ def normalize_scenario_key(value: str) -> str:
         return "default"
     if normalized.lower() == "all":
         return "all"
+    if normalized.upper() in {"EXP-U010", "EXP-U10"}:
+        return "EXP-U10"
     for key in SCENARIOS:
         if key.upper() == normalized.upper():
             return key
@@ -256,6 +306,30 @@ EXPECTATION_CATALOG = [
         "name": "View available assets",
         "category": "UI",
         "description": "View available assets under 'All' tabs after clicking on 'Assets' button, wait for assets to load",
+    },
+    {
+        "id": "EXP-U08",
+        "name": "'USDC - Base' radio button",
+        "category": "UI",
+        "description": "View available assets under 'All' tabs after clicking on 'Assets' button, wait for assets to load, once the assets are loaded, select 'Base - USDC' radio button, enter '0.1' value as source",
+    },
+    {
+        "id": "EXP-U09",
+        "name": "Bridging the token",
+        "category": "UI",
+        "description": "View available assets under 'All' tabs after clicking on 'Assets' button, wait for assets to load, once the assets are loaded, select 'Base - USDC' radio button, enter '0.1' value as source, select 'Base - ETH' from RECEIVE ---> Select token to receive dropdown view, wait for quotes to be fetched, click on \"Review swap\"",
+    },
+    {
+        "id": "EXP-U10",
+        "name": "USDC Bridge Execution",
+        "category": "UI",
+        "description": "View available assets under 'All' tabs after clicking on 'Assets' button, wait for assets to load, once the assets are loaded, select 'Base - USDC' radio button, enter '0.1' value as source, select 'Base - ETH' from RECEIVE ---> Select token to receive dropdown view, wait for quotes to be fetched, click on 'Review swap', wait for next page loading, click on 'swap now', approve all wallet signatures, wait for the view to change from 'Swapping....' to 'Swap Complete' and the 'Done' button to appear",
+    },
+    {
+        "id": "EXP-U11",
+        "name": "ETH Bridge Execution",
+        "category": "UI",
+        "description": "View available assets under 'All' tabs after clicking on 'Assets' button, wait for assets to load, once the assets are loaded, select 'Base - ETH' radio button, enter '0.0001' value as source, select 'Base - USDC' from RECEIVE ---> Select token to receive dropdown view, wait for quotes to be fetched, click on 'Review swap', wait for next page loading, click on 'swap now', approve all wallet signatures, wait for the view to change from 'Swapping....' to 'Swap Complete' and the 'Done' button to appear",
     },
     {
         "id": "EXP-E01",
@@ -623,6 +697,648 @@ def check_available_assets_all_tab(page: Page, timeout_ms: int = 30000) -> Dict[
     }
 
 
+def select_v2_chain_token_row(page: Page, token: str, chain: str) -> bool:
+    markers = page.get_by_text(chain, exact=True)
+    for index in range(markers.count()):
+        marker = markers.nth(index)
+        if not marker.is_visible():
+            continue
+        row_text = marker.evaluate(
+            """(el, token) => {
+                let node = el;
+                for (let i = 0; i < 8 && node; i++) {
+                    const text = (node.innerText || '').trim();
+                    if (text.includes(token) && /\\bBase\\b/.test(text)) {
+                        return text;
+                    }
+                    node = node.parentElement;
+                }
+                return '';
+            }""",
+            token,
+        )
+        if not row_text or "UNIFIED" in row_text.upper() or len(row_text) > 200:
+            continue
+        if token not in row_text:
+            continue
+
+        row = marker.locator(
+            f"xpath=ancestor::*[contains(., '{token}') and contains(., '{chain}') and not(contains(., 'UNIFIED'))][1]"
+        )
+        if row.count() == 0:
+            row = marker.locator("xpath=ancestor::div[1]")
+        row.scroll_into_view_if_needed()
+        row.click(position={"x": 24, "y": 12})
+        page.wait_for_timeout(1000)
+        return True
+
+    return False
+
+
+def select_v2_base_usdc_radio(page: Page) -> bool:
+    return select_v2_chain_token_row(page, "USDC", "Base")
+
+
+def fill_v2_picker_source_amount(page: Page, amount: str) -> bool:
+    inputs = page.locator(
+        "input[placeholder='0'], input[placeholder='0.0'], input[type='number'], input[inputmode='decimal']"
+    )
+    for index in range(inputs.count()):
+        field = inputs.nth(index)
+        if not field.is_visible() or not field.is_enabled():
+            continue
+        placeholder = (field.get_attribute("placeholder") or "").lower()
+        aria_label = (field.get_attribute("aria-label") or "").lower()
+        if "search" in placeholder or "search" in aria_label:
+            continue
+        field.click()
+        field.fill("")
+        field.fill(amount)
+        page.wait_for_timeout(500)
+        value = field.input_value().strip()
+        if value == amount or value.startswith(amount):
+            return True
+
+    for button_name in ["Done", "Save"]:
+        button = page.get_by_role("button", name=button_name)
+        if button.count() > 0 and button.first.is_visible() and button.first.is_enabled():
+            button.first.click()
+            page.wait_for_timeout(1000)
+            break
+
+    fill_v2_amount(page, amount)
+    page.wait_for_timeout(500)
+    return verify_v2_source_amount_entered(page, amount)
+
+
+def verify_v2_source_amount_entered(page: Page, amount: str) -> bool:
+    try:
+        target = float(amount)
+    except ValueError:
+        target = None
+
+    inputs = page.locator(
+        "input[placeholder='0'], input[placeholder='0.0'], input[type='number'], input[inputmode='decimal']"
+    )
+    for index in range(inputs.count()):
+        field = inputs.nth(index)
+        if not field.is_visible():
+            continue
+        placeholder = (field.get_attribute("placeholder") or "").lower()
+        if "search" in placeholder:
+            continue
+        value = field.input_value().strip()
+        if not value:
+            continue
+        if value == amount:
+            return True
+        if target is not None:
+            try:
+                tolerance = max(1e-6, abs(target) * 0.05)
+                if abs(float(value) - target) < tolerance:
+                    return True
+            except ValueError:
+                continue
+    return False
+
+
+def check_v2_source_token_amount(
+    page: Page,
+    source_token: str,
+    amount: str = "0.1",
+    timeout_ms: int = 30000,
+) -> Dict[str, Any]:
+    assets_phase = check_available_assets_all_tab(page, timeout_ms=timeout_ms)
+    source_token_selected = False
+    source_amount_entered = False
+
+    if assets_phase.get("assets_loaded"):
+        source_token_selected = (
+            select_v2_token_on_base_radio(page, source_token)
+            or select_v2_chain_token_row(page, source_token, "Base")
+        )
+        page.wait_for_timeout(1000)
+        if source_token_selected:
+            source_amount_entered = fill_v2_picker_source_amount(page, amount)
+            if not source_amount_entered:
+                page.wait_for_timeout(1000)
+                source_amount_entered = verify_v2_source_amount_entered(page, amount)
+
+    label = f"{DESTINATION_SLUG}-{source_token.lower()}-source-amount"
+    capture = wait_and_capture(page, label, 500)
+    result = {
+        "picker_opened": assets_phase.get("picker_opened"),
+        "all_tab_selected": assets_phase.get("all_tab_selected"),
+        "assets_loaded": assets_phase.get("assets_loaded"),
+        "source_token_selected": source_token_selected,
+        "source_amount_entered": source_amount_entered,
+        "text": capture["text"],
+        "screenshot": capture["screenshot"],
+    }
+    if source_token == "USDC":
+        result["base_usdc_selected"] = source_token_selected
+    if source_token == "ETH":
+        result["base_eth_selected"] = source_token_selected
+    return result
+
+
+def check_base_usdc_source_amount(page: Page, amount: str = "0.1", timeout_ms: int = 30000) -> Dict[str, Any]:
+    return check_v2_source_token_amount(page, "USDC", amount=amount, timeout_ms=timeout_ms)
+
+
+def is_receive_token_picker_open(text: str) -> bool:
+    if re.search(r"Select token to receive|Choose assets to receive", text, re.I):
+        return True
+    return "Choose assets to send" not in text and bool(re.search(r"Search token", text, re.I))
+
+
+def click_v2_receive_token_selector(page: Page) -> bool:
+    clicked = page.evaluate(
+        """() => {
+            const isVisible = (el) => {
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+            };
+            const tokenButtons = Array.from(document.querySelectorAll('button')).filter((el) => {
+                if (!isVisible(el)) return false;
+                const text = (el.textContent || '').trim();
+                return /^(USDC|ETH|USDT|DAI|WETH)$/.test(text);
+            });
+            if (tokenButtons.length === 0) return false;
+
+            tokenButtons.sort(
+                (a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top
+            );
+            const receiveButton = tokenButtons.length >= 2
+                ? tokenButtons[tokenButtons.length - 1]
+                : tokenButtons.find((button) => {
+                    let node = button.parentElement;
+                    for (let i = 0; i < 8 && node; i++) {
+                        const text = (node.textContent || '').replace(/\\s+/g, ' ');
+                        if (/receive/i.test(text) && /recipient/i.test(text)) {
+                            return true;
+                        }
+                        node = node.parentElement;
+                    }
+                    return false;
+                }) || tokenButtons[tokenButtons.length - 1];
+
+            receiveButton.click();
+            return true;
+        }"""
+    )
+    if clicked:
+        page.wait_for_timeout(1000)
+    return bool(clicked)
+
+
+def open_v2_receive_token_picker(page: Page, timeout_ms: int = 15000) -> bool:
+    body_text = page.locator("body").inner_text()
+    if is_receive_token_picker_open(body_text):
+        return True
+
+    click_v2_receive_token_selector(page)
+
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while time.monotonic() < deadline:
+        text = page.locator("body").inner_text()
+        if is_receive_token_picker_open(text):
+            return True
+        click_v2_receive_token_selector(page)
+        page.wait_for_timeout(500)
+    return False
+
+
+def receive_panel_shows_token(page: Page, token: str = "ETH") -> bool:
+    text = page.locator("body").inner_text()
+    if re.search(r"Select token to receive|Choose assets to receive", text, re.I):
+        return False
+    match = re.search(r"RECEIVE([\s\S]*?)(?:RECIPIENT|TOTAL|Powered by|$)", text, re.I)
+    if not match:
+        return False
+    return bool(re.search(rf"\b{re.escape(token)}\b", match.group(1)))
+
+
+def close_v2_receive_token_picker(page: Page) -> None:
+    for button_name in ["Done", "Save"]:
+        button = page.get_by_role("button", name=button_name)
+        if button.count() > 0 and button.first.is_visible() and button.first.is_enabled():
+            button.first.click()
+            page.wait_for_timeout(1000)
+            break
+    body_text = page.locator("body").inner_text()
+    if re.search(r"Select token to receive|Choose assets to receive", body_text, re.I):
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(1000)
+
+
+def finalize_v2_receive_token_selection(page: Page, token: str = "ETH") -> bool:
+    close_v2_receive_token_picker(page)
+    page.wait_for_timeout(1000)
+    return receive_panel_shows_token(page, token)
+
+
+def filter_v2_picker_chain(page: Page, chain_name: str = "Base") -> bool:
+    for label in ("All chains", "All Chains"):
+        trigger = page.get_by_text(label, exact=True)
+        if trigger.count() > 0 and trigger.first.is_visible():
+            _safe_click(trigger.first)
+            page.wait_for_timeout(1000)
+            break
+
+    for selector in (
+        page.get_by_role("option", name=re.compile(rf"^{re.escape(chain_name)}$", re.I)),
+        page.get_by_role("menuitem", name=re.compile(rf"^{re.escape(chain_name)}$", re.I)),
+        page.get_by_text(re.compile(rf"^{re.escape(chain_name)}$", re.I)),
+    ):
+        for index in range(min(selector.count(), 12)):
+            option = selector.nth(index)
+            if not option.is_visible():
+                continue
+            option_text = option.inner_text().strip()
+            if option_text.lower() != chain_name.lower():
+                continue
+            if _safe_click(option):
+                page.wait_for_timeout(1000)
+                return True
+    return False
+
+
+def select_v2_token_on_base_radio(page: Page, token: str) -> bool:
+    target = page.evaluate(
+        """(token) => {
+            const isVisible = (el) => {
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+            };
+            const candidates = [];
+            for (const el of document.querySelectorAll('button, div, li, [role="option"], [role="radio"]')) {
+                if (!isVisible(el)) continue;
+                const lines = (el.innerText || '').split('\\n').map((line) => line.trim()).filter(Boolean);
+                if (lines.length < 2) continue;
+                if (lines[0] !== token) continue;
+                if (!/^on Base$/i.test(lines[1])) continue;
+                const text = lines.join(' ');
+                if (text.length > 120) continue;
+                const rect = el.getBoundingClientRect();
+                candidates.push({
+                    len: text.length,
+                    area: rect.width * rect.height,
+                    x: rect.left + Math.min(24, rect.width * 0.08),
+                    y: rect.top + rect.height / 2,
+                });
+            }
+            if (candidates.length === 0) return null;
+            candidates.sort((a, b) => a.len - b.len || a.area - b.area);
+            return candidates[0];
+        }""",
+        token,
+    )
+    if not target:
+        return False
+    page.mouse.click(target["x"], target["y"])
+    page.wait_for_timeout(1000)
+    return True
+
+
+def select_v2_eth_on_base_radio(page: Page) -> bool:
+    return select_v2_token_on_base_radio(page, "ETH")
+
+
+def select_v2_receive_base_token(page: Page, token: str, timeout_ms: int = 20000) -> bool:
+    search_queries = {
+        "ETH": ("ETH on Base", "ETH"),
+        "USDC": ("USDC on Base", "USDC"),
+    }
+    queries = search_queries.get(token, (f"{token} on Base", token))
+
+    for selector in (
+        page.get_by_role("tab", name="All"),
+        page.locator("[role='tab']").filter(has_text=re.compile(r"^All$")),
+    ):
+        if selector.count() > 0 and selector.first.is_visible():
+            selector.first.click()
+            page.wait_for_timeout(1000)
+            break
+
+    filter_v2_picker_chain(page, "Base")
+
+    search = page.get_by_placeholder(re.compile(r"Search token", re.I))
+    if search.count() > 0 and search.first.is_visible():
+        search.first.fill("")
+        for query in queries:
+            search.first.fill(query)
+            page.wait_for_timeout(1500)
+            if select_v2_token_on_base_radio(page, token):
+                return finalize_v2_receive_token_selection(page, token)
+
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while time.monotonic() < deadline:
+        text = page.locator("body").inner_text()
+        if receive_panel_shows_token(page, token):
+            return True
+        if "No tokens found" in text:
+            filter_v2_picker_chain(page, "Base")
+            if search.count() > 0 and search.first.is_visible():
+                search.first.fill(queries[0])
+                page.wait_for_timeout(1500)
+            page.wait_for_timeout(1000)
+            continue
+        if re.search(r"(Loading|Fetching)", text, re.I):
+            page.wait_for_timeout(1000)
+            continue
+        if select_v2_token_on_base_radio(page, token):
+            return finalize_v2_receive_token_selection(page, token)
+        page.wait_for_timeout(1000)
+    return receive_panel_shows_token(page, token)
+
+
+def select_v2_receive_base_eth(page: Page, timeout_ms: int = 20000) -> bool:
+    return select_v2_receive_base_token(page, "ETH", timeout_ms=timeout_ms)
+
+
+def wait_for_v2_quote_fetched(page: Page, receive_token: str = "ETH", timeout_ms: int = 45000) -> bool:
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while time.monotonic() < deadline:
+        text = page.locator("body").inner_text()
+        if re.search(
+            r"Choose assets to (send|receive)|Select token to receive",
+            text,
+            re.I,
+        ):
+            page.wait_for_timeout(1000)
+            continue
+        if re.search(r"Fetching quotes?", text, re.I):
+            page.wait_for_timeout(1000)
+            continue
+        receive_section = re.search(r"RECEIVE([\s\S]*?)(?:RECIPIENT|TOTAL|Powered by|$)", text, re.I)
+        receive_text = receive_section.group(1) if receive_section else text
+        if not re.search(rf"\b{re.escape(receive_token)}\b", receive_text):
+            page.wait_for_timeout(1000)
+            continue
+        receive_total = extract_v2_asset_total(text, "RECEIVE")
+        if positive_usd_amount(receive_total) is not None:
+            return True
+        if re.search(
+            rf"{re.escape(receive_token)}[\s\S]{{0,200}}≈\s*\$[0-9]",
+            receive_text,
+        ):
+            return True
+        page.wait_for_timeout(1000)
+    return False
+
+
+def click_v2_review_swap(page: Page, timeout_ms: int = 15000) -> bool:
+    button = find_button(page, "Review swap")
+    if not button or not button.is_visible():
+        return False
+    try:
+        button.wait_for(state="visible", timeout=timeout_ms)
+    except PlaywrightTimeoutError:
+        return False
+    if not button.is_enabled():
+        return False
+    try:
+        button.click(timeout=timeout_ms)
+        return True
+    except PlaywrightTimeoutError:
+        try:
+            button.click(force=True, timeout=5000)
+            return True
+        except PlaywrightTimeoutError:
+            return False
+
+
+def check_bridging_token_flow(
+    page: Page,
+    amount: str = "0.1",
+    source_token: str = "USDC",
+    receive_token: str = "ETH",
+    timeout_ms: int = 30000,
+) -> Dict[str, Any]:
+    source_phase = check_v2_source_token_amount(
+        page, source_token, amount=amount, timeout_ms=timeout_ms
+    )
+    source_ready = bool(
+        source_phase.get("picker_opened")
+        and source_phase.get("all_tab_selected")
+        and source_phase.get("assets_loaded")
+        and source_phase.get("source_token_selected")
+        and source_phase.get("source_amount_entered")
+    )
+
+    receive_picker_opened = False
+    receive_token_selected = False
+    quote_fetched = False
+    review_swap_clicked = False
+
+    if source_ready:
+        receive_picker_opened = open_v2_receive_token_picker(page)
+        if receive_picker_opened:
+            select_v2_receive_base_token(page, receive_token)
+            receive_token_selected = receive_panel_shows_token(page, receive_token)
+        quote_fetched = (
+            wait_for_v2_quote_fetched(page, receive_token=receive_token)
+            if receive_token_selected
+            else False
+        )
+        review_swap_clicked = click_v2_review_swap(page, timeout_ms=15000) if quote_fetched else False
+
+    capture = wait_and_capture(page, f"{DESTINATION_SLUG}-bridging-token", 500)
+    result = {
+        **source_phase,
+        "receive_picker_opened": receive_picker_opened,
+        "receive_token_selected": receive_token_selected,
+        "quote_fetched": quote_fetched,
+        "review_swap_clicked": review_swap_clicked,
+        "text": capture["text"],
+        "screenshot": capture["screenshot"],
+    }
+    if source_token == "USDC":
+        result["base_usdc_selected"] = source_phase.get("source_token_selected")
+    if source_token == "ETH":
+        result["base_eth_selected"] = source_phase.get("source_token_selected")
+    if receive_token == "ETH":
+        result["base_eth_selected"] = receive_token_selected
+    if receive_token == "USDC":
+        result["base_usdc_selected"] = receive_token_selected
+    return result
+
+
+WALLET_SIGNATURE_METHODS = {
+    "personal_sign",
+    "eth_signTypedData",
+    "eth_signTypedData_v3",
+    "eth_signTypedData_v4",
+    "eth_sendTransaction",
+}
+
+
+def is_swapping_view(text: str) -> bool:
+    return bool(re.search(r"Swapping\.+", text, re.I))
+
+
+def is_swap_complete_view(page: Page, text: Optional[str] = None) -> bool:
+    body_text = text if text is not None else page.locator("body").inner_text()
+    if not re.search(r"Swap Complete", body_text, re.I):
+        return False
+    done = find_button(page, "Done")
+    return done is not None and done.is_visible()
+
+
+def is_swap_success_message(text: str) -> bool:
+    return any(
+        re.search(pattern, text, re.I)
+        for pattern in (
+            r"Bridge Successful",
+            r"Transaction Completed",
+            r"Swap Successful",
+            r"swap completed",
+            r"successfully completed",
+        )
+    )
+
+
+def wait_for_v2_review_page(page: Page, timeout_ms: int = 20000) -> bool:
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while time.monotonic() < deadline:
+        text = page.locator("body").inner_text()
+        if re.search(r"Fetching quotes?", text, re.I):
+            page.wait_for_timeout(1000)
+            continue
+        for name in ("Swap now", "Swap Now"):
+            button = find_button(page, name)
+            if button and button.is_visible():
+                return True
+        if re.search(r"Review (swap|your swap)|Confirm swap|You(?:'re| are) swapping", text, re.I):
+            return True
+        page.wait_for_timeout(1000)
+    return False
+
+
+def click_v2_swap_now(page: Page, timeout_ms: int = 30000) -> bool:
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while time.monotonic() < deadline:
+        for name in ("Swap now", "Swap Now"):
+            button = find_button(page, name)
+            if not button or not button.is_visible() or not button.is_enabled():
+                continue
+            if _safe_click(button, timeout_ms=5000):
+                return True
+        page.wait_for_timeout(1000)
+    return False
+
+
+def run_v2_swap_execution_phase(
+    page: Page,
+    provider_calls: List[Dict[str, Any]],
+    timeout_ms: int = 120000,
+    initial_call_count: int = 0,
+) -> Dict[str, Any]:
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    wallet_signatures_approved = False
+    swapping_seen = False
+    swap_complete_shown = False
+
+    while time.monotonic() < deadline:
+        for button_name in ("Accept", "Approve Selected", "Approve All", "Confirm", "Sign", "Execute"):
+            click_if_enabled(page, button_name, timeout_ms=2000)
+
+        text = page.locator("body").inner_text()
+        if is_swapping_view(text):
+            swapping_seen = True
+        if is_swap_complete_view(page, text):
+            swap_complete_shown = True
+            break
+
+        recent_calls = provider_calls[initial_call_count:]
+        if any(call.get("method") in WALLET_SIGNATURE_METHODS for call in recent_calls):
+            wallet_signatures_approved = True
+
+        page.wait_for_timeout(2000)
+
+    capture = wait_and_capture(page, f"{DESTINATION_SLUG}-swap-execution", 500)
+    if not swap_complete_shown:
+        swap_complete_shown = is_swap_complete_view(page, capture["text"])
+
+    return {
+        "swapping_seen": swapping_seen,
+        "wallet_signatures_approved": wallet_signatures_approved,
+        "swap_complete_shown": swap_complete_shown,
+        "text": capture["text"],
+        "screenshot": capture["screenshot"],
+    }
+
+
+def check_bridge_execution_flow(
+    page: Page,
+    amount: str = "0.1",
+    source_token: str = "USDC",
+    receive_token: str = "ETH",
+    timeout_ms: int = 30000,
+    execution_timeout_ms: int = 120000,
+    provider_calls: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    provider_calls = provider_calls or []
+    initial_call_count = len(provider_calls)
+    bridging_phase = check_bridging_token_flow(
+        page,
+        amount=amount,
+        source_token=source_token,
+        receive_token=receive_token,
+        timeout_ms=timeout_ms,
+    )
+    bridging_ready = bool(
+        bridging_phase.get("picker_opened")
+        and bridging_phase.get("all_tab_selected")
+        and bridging_phase.get("assets_loaded")
+        and bridging_phase.get("source_token_selected")
+        and bridging_phase.get("source_amount_entered")
+        and bridging_phase.get("receive_picker_opened")
+        and bridging_phase.get("receive_token_selected")
+        and bridging_phase.get("quote_fetched")
+        and bridging_phase.get("review_swap_clicked")
+    )
+
+    review_page_loaded = False
+    swap_now_clicked = False
+    wallet_signatures_approved = False
+    swap_complete_shown = False
+    execution_started_at: Optional[float] = None
+    execution_phase = {"text": "", "screenshot": ""}
+
+    if bridging_ready:
+        review_page_loaded = wait_for_v2_review_page(page)
+        if review_page_loaded:
+            execution_started_at = time.monotonic()
+            swap_now_clicked = click_v2_swap_now(page)
+        execution_phase = run_v2_swap_execution_phase(
+            page,
+            provider_calls,
+            timeout_ms=execution_timeout_ms,
+            initial_call_count=initial_call_count,
+        )
+        wallet_signatures_approved = bool(execution_phase.get("wallet_signatures_approved"))
+        swap_complete_shown = bool(execution_phase.get("swap_complete_shown"))
+
+    capture = wait_and_capture(page, f"{DESTINATION_SLUG}-bridge-execution", 500)
+    return {
+        **bridging_phase,
+        "review_page_loaded": review_page_loaded,
+        "swap_now_clicked": swap_now_clicked,
+        "wallet_signatures_approved": wallet_signatures_approved,
+        "swapping_seen": execution_phase.get("swapping_seen", False),
+        "swap_complete_shown": swap_complete_shown,
+        "execution_started_at": execution_started_at,
+        "text": capture["text"],
+        "screenshot": capture["screenshot"],
+        "execution_text": execution_phase.get("text", ""),
+        "execution_screenshot": execution_phase.get("screenshot", ""),
+    }
+
+
 def check_assets_button_visible(page: Page, timeout_ms: int = 15000) -> Dict[str, Any]:
     assets_buttons = page.get_by_role("button", name="Assets")
     assets_label = page.get_by_text("Assets", exact=True)
@@ -675,6 +1391,20 @@ def open_v2_asset_picker(page: Page, section: str) -> None:
         page.wait_for_timeout(1000)
 
 
+def _safe_click(locator, timeout_ms: int = 5000, force: bool = False) -> bool:
+    try:
+        locator.click(timeout=timeout_ms, force=force)
+        return True
+    except PlaywrightTimeoutError:
+        if force:
+            return False
+        try:
+            locator.click(timeout=timeout_ms, force=True)
+            return True
+        except PlaywrightTimeoutError:
+            return False
+
+
 def select_v2_modal_token(page: Page, token_hint: str, chain_hint: Optional[str] = None) -> bool:
     search = page.get_by_placeholder(re.compile(r"Search token", re.I))
     if search.count() > 0:
@@ -690,26 +1420,30 @@ def select_v2_modal_token(page: Page, token_hint: str, chain_hint: Optional[str]
                 continue
             candidate_text = candidate.inner_text()
             if token_hint.lower() in candidate_text.lower():
-                candidate.click()
-                selected = True
-                break
+                if _safe_click(candidate):
+                    selected = True
+                    break
 
     if not selected:
-        token_option = page.get_by_text(re.compile(rf"{re.escape(token_hint)}", re.I))
+        token_option = page.get_by_text(re.compile(rf"^{re.escape(token_hint)}$", re.I))
         for idx in range(min(token_option.count(), 8)):
             candidate = token_option.nth(idx)
             if not candidate.is_visible():
                 continue
-            candidate.click()
-            selected = True
-            break
+            row = candidate.locator(
+                f"xpath=ancestor::*[contains(., '{token_hint}') and contains(., '{chain_hint or token_hint}')][1]"
+            )
+            target = row.first if row.count() > 0 else candidate
+            if _safe_click(target):
+                selected = True
+                break
 
     done = find_button(page, "Done")
     if done and done.is_visible() and done.is_enabled():
         done.click()
         page.wait_for_timeout(1500)
         return selected
-    return False
+    return selected
 
 
 def prepare_v2_assets(page: Page, destination_name: str) -> None:
@@ -982,8 +1716,11 @@ def click_if_enabled(page: Page, name: str, timeout_ms: int = 15000) -> bool:
         return False
     if not button.is_enabled():
         return False
-    button.click()
-    return True
+    try:
+        button.click(timeout=timeout_ms)
+        return True
+    except PlaywrightTimeoutError:
+        return False
 
 
 def run_v1_bridge_flow(
@@ -1890,6 +2627,53 @@ def run_scenario(scenario_key: str, private_key: str) -> Dict[str, Any]:
         "screenshot": "",
     }
     available_assets_loaded = False
+    base_usdc_source_check: Dict[str, Any] = {
+        "picker_opened": False,
+        "all_tab_selected": False,
+        "assets_loaded": False,
+        "base_usdc_selected": False,
+        "source_amount_entered": False,
+        "text": "",
+        "screenshot": "",
+    }
+    base_usdc_source_passed = False
+    bridging_token_check: Dict[str, Any] = {
+        "picker_opened": False,
+        "all_tab_selected": False,
+        "assets_loaded": False,
+        "base_usdc_selected": False,
+        "source_token_selected": False,
+        "source_amount_entered": False,
+        "receive_picker_opened": False,
+        "base_eth_selected": False,
+        "receive_token_selected": False,
+        "quote_fetched": False,
+        "review_swap_clicked": False,
+        "text": "",
+        "screenshot": "",
+    }
+    bridging_token_passed = False
+    bridge_execution_check: Dict[str, Any] = {
+        "picker_opened": False,
+        "all_tab_selected": False,
+        "assets_loaded": False,
+        "base_usdc_selected": False,
+        "source_token_selected": False,
+        "source_amount_entered": False,
+        "receive_picker_opened": False,
+        "base_eth_selected": False,
+        "receive_token_selected": False,
+        "quote_fetched": False,
+        "review_swap_clicked": False,
+        "review_page_loaded": False,
+        "swap_now_clicked": False,
+        "wallet_signatures_approved": False,
+        "swapping_seen": False,
+        "swap_complete_shown": False,
+        "text": "",
+        "screenshot": "",
+    }
+    bridge_execution_passed = False
     ui_version = "v1"
     initial: Dict[str, Any] = {"text": "", "screenshot": ""}
 
@@ -2007,6 +2791,176 @@ def run_scenario(scenario_key: str, private_key: str) -> Dict[str, Any]:
                     root_cause="The asset picker did not show loaded tokens under the All tab.",
                 )
 
+        if scenario_config.get("check_base_usdc_source_amount"):
+            source_amount = str(scenario_config.get("source_amount") or "0.1")
+            base_usdc_source_check = check_base_usdc_source_amount(page, amount=source_amount)
+            base_usdc_source_passed = bool(
+                base_usdc_source_check.get("picker_opened")
+                and base_usdc_source_check.get("all_tab_selected")
+                and base_usdc_source_check.get("assets_loaded")
+                and base_usdc_source_check.get("base_usdc_selected")
+                and base_usdc_source_check.get("source_amount_entered")
+            )
+            artifacts.append(
+                {
+                    "label": "Base USDC source amount",
+                    "path": base_usdc_source_check["screenshot"],
+                }
+            )
+            step_log.append(
+                {
+                    "label": f"{DESTINATION_SLUG}-base-usdc-source-amount",
+                    "text": base_usdc_source_check["text"],
+                    "screenshot": base_usdc_source_check["screenshot"],
+                }
+            )
+            if not base_usdc_source_passed:
+                append_issue(
+                    issues,
+                    "Base USDC Source Amount Not Entered",
+                    "high",
+                    (
+                        "After loading assets under the All tab, the test could not select the Base USDC "
+                        f"radio and enter {source_amount} as the source amount."
+                    ),
+                    [
+                        f"Open the {destination_name} route with a connected wallet.",
+                        "Click Assets, wait for the All tab asset list to load.",
+                        "Select the Base USDC radio button and enter 0.1 as the source amount.",
+                    ],
+                    issue_id="FB-P1-008",
+                    evidence=base_usdc_source_check["screenshot"],
+                    root_cause="The Base USDC asset row or source amount input did not accept the requested value.",
+                )
+
+        if scenario_config.get("check_bridging_token_flow"):
+            source_amount = str(scenario_config.get("source_amount") or "0.1")
+            bridging_token_check = check_bridging_token_flow(page, amount=source_amount)
+            bridging_token_passed = bool(
+                bridging_token_check.get("picker_opened")
+                and bridging_token_check.get("all_tab_selected")
+                and bridging_token_check.get("assets_loaded")
+                and bridging_token_check.get("source_token_selected")
+                and bridging_token_check.get("source_amount_entered")
+                and bridging_token_check.get("receive_picker_opened")
+                and bridging_token_check.get("receive_token_selected")
+                and bridging_token_check.get("quote_fetched")
+                and bridging_token_check.get("review_swap_clicked")
+            )
+            artifacts.append(
+                {
+                    "label": "Bridging token flow",
+                    "path": bridging_token_check["screenshot"],
+                }
+            )
+            step_log.append(
+                {
+                    "label": f"{DESTINATION_SLUG}-bridging-token",
+                    "text": bridging_token_check["text"],
+                    "screenshot": bridging_token_check["screenshot"],
+                }
+            )
+            if not bridging_token_passed:
+                append_issue(
+                    issues,
+                    "Bridging Token Flow Did Not Complete",
+                    "high",
+                    (
+                        "After configuring Base USDC source amount, the test could not select Base ETH "
+                        "in the receive picker, wait for quotes, and click Review swap."
+                    ),
+                    [
+                        f"Open the {destination_name} route with a connected wallet.",
+                        "Configure SEND with Base USDC and 0.1 as the source amount.",
+                        "Open RECEIVE token picker, select Base ETH, wait for quotes, and click Review swap.",
+                    ],
+                    issue_id="FB-P1-009",
+                    evidence=bridging_token_check["screenshot"],
+                    root_cause="Receive token selection, quote fetch, or Review swap action did not complete.",
+                )
+
+        if scenario_config.get("check_bridge_execution_flow"):
+            source_amount = str(scenario_config.get("source_amount") or "0.1")
+            source_token = str(scenario_config.get("source_token") or "USDC")
+            receive_token = str(scenario_config.get("receive_token") or "ETH")
+            bridge_execution_check = check_bridge_execution_flow(
+                page,
+                amount=source_amount,
+                source_token=source_token,
+                receive_token=receive_token,
+                provider_calls=provider_calls,
+            )
+            bridge_execution_passed = bool(
+                bridge_execution_check.get("picker_opened")
+                and bridge_execution_check.get("all_tab_selected")
+                and bridge_execution_check.get("assets_loaded")
+                and bridge_execution_check.get("source_token_selected")
+                and bridge_execution_check.get("source_amount_entered")
+                and bridge_execution_check.get("receive_picker_opened")
+                and bridge_execution_check.get("receive_token_selected")
+                and bridge_execution_check.get("quote_fetched")
+                and bridge_execution_check.get("review_swap_clicked")
+                and bridge_execution_check.get("review_page_loaded")
+                and bridge_execution_check.get("swap_now_clicked")
+                and bridge_execution_check.get("wallet_signatures_approved")
+                and bridge_execution_check.get("swap_complete_shown")
+            )
+            execution_attempted = bool(bridge_execution_check.get("swap_now_clicked"))
+            if bridge_execution_check.get("execution_started_at") is not None:
+                execution_start = bridge_execution_check["execution_started_at"]
+            artifacts.append(
+                {
+                    "label": "Bridge execution flow",
+                    "path": bridge_execution_check["screenshot"],
+                }
+            )
+            step_log.append(
+                {
+                    "label": f"{DESTINATION_SLUG}-bridge-execution",
+                    "text": bridge_execution_check["text"],
+                    "screenshot": bridge_execution_check["screenshot"],
+                }
+            )
+            if bridge_execution_check.get("execution_screenshot"):
+                artifacts.append(
+                    {
+                        "label": "Swap execution state",
+                        "path": bridge_execution_check["execution_screenshot"],
+                    }
+                )
+                step_log.append(
+                    {
+                        "label": f"{DESTINATION_SLUG}-swap-execution",
+                        "text": bridge_execution_check.get("execution_text", ""),
+                        "screenshot": bridge_execution_check["execution_screenshot"],
+                    }
+                )
+            final_state = {
+                "label": f"{DESTINATION_SLUG}-bridge-execution",
+                "text": bridge_execution_check["text"],
+                "screenshot": bridge_execution_check["screenshot"],
+            }
+            if execution_attempted and execution_start is not None:
+                execution_completion_ms = int((time.monotonic() - execution_start) * 1000)
+            if not bridge_execution_passed:
+                append_issue(
+                    issues,
+                    "Bridge Execution Flow Did Not Complete",
+                    "high",
+                    (
+                        "After configuring the swap and clicking Review swap, the test could not complete "
+                        "execution via Swap now, wallet approvals, and Swap Complete with the Done button."
+                    ),
+                    [
+                        f"Open the {destination_name} route with a connected wallet.",
+                        f"Configure Base {source_token} source and Base {receive_token} receive, then click Review swap.",
+                        "Click Swap now, approve wallet signatures, and wait for Swap Complete with the Done button.",
+                    ],
+                    issue_id="FB-P1-011" if scenario_key == "EXP-U11" else "FB-P1-010",
+                    evidence=bridge_execution_check["screenshot"],
+                    root_cause="Swap execution, wallet signature approval, or Swap Complete confirmation did not appear.",
+                )
+
         idle_timeout_message_seen: Optional[bool] = None
         idle_capture_text: Optional[str] = None
         if idle_init_test:
@@ -2049,7 +3003,7 @@ def run_scenario(scenario_key: str, private_key: str) -> Dict[str, Any]:
         after_amount = {"text": ""}
         review = {"text": ""}
         allowance = {"text": ""}
-        post_approve = {"text": ""}
+        post_approve = {"text": "", "screenshot": ""}
         final_state = initial
         balance_loaded = positive_usd_amount(str(available_unified_usdc)) is not None if available_unified_usdc is not None else False
         quote_rendered = False
@@ -2111,7 +3065,11 @@ def run_scenario(scenario_key: str, private_key: str) -> Dict[str, Any]:
     worked = []
     summary = []
     final_text = final_state["text"]
-    bridge_successful = "Bridge Successful!" in final_text and "Transaction Completed" in final_text
+    bridge_successful = (
+        ("Bridge Successful!" in final_text and "Transaction Completed" in final_text)
+        or is_swap_success_message(final_text)
+        or bool(re.search(r"Swap Complete", final_text, re.I))
+    )
     used_gasless_flow = any(call["method"] in {"eth_signTypedData", "eth_signTypedData_v3", "eth_signTypedData_v4"} for call in provider_calls)
     user_facing_error_seen = any("Oops! Something went wrong. Please try again." in step["text"] for step in step_log)
     initial_quote = (
@@ -2453,6 +3411,116 @@ def run_scenario(scenario_key: str, private_key: str) -> Dict[str, Any]:
                             f"picker_opened={available_assets_check.get('picker_opened')}",
                             f"all_tab_selected={available_assets_check.get('all_tab_selected')}",
                             f"assets_loaded={available_assets_check.get('assets_loaded')}",
+                        ]
+                    )
+                )
+            ),
+        },
+        {
+            "id": "EXP-U08",
+            "name": "'USDC - Base' radio button",
+            "status": "PASS" if base_usdc_source_passed else "FAIL",
+            "notes": (
+                "Assets loaded under All, Base USDC selected, and 0.1 entered as source amount."
+                if base_usdc_source_passed
+                else (
+                    "EXP-U08 checks: "
+                    + ", ".join(
+                        [
+                            f"picker_opened={base_usdc_source_check.get('picker_opened')}",
+                            f"all_tab_selected={base_usdc_source_check.get('all_tab_selected')}",
+                            f"assets_loaded={base_usdc_source_check.get('assets_loaded')}",
+                            f"base_usdc_selected={base_usdc_source_check.get('base_usdc_selected')}",
+                            f"source_amount_entered={base_usdc_source_check.get('source_amount_entered')}",
+                        ]
+                    )
+                )
+            ),
+        },
+        {
+            "id": "EXP-U09",
+            "name": "Bridging the token",
+            "status": "PASS" if bridging_token_passed else "FAIL",
+            "notes": (
+                "Base USDC source configured, Base ETH selected in receive picker, quotes fetched, and Review swap clicked."
+                if bridging_token_passed
+                else (
+                    "EXP-U09 checks: "
+                    + ", ".join(
+                        [
+                            f"picker_opened={bridging_token_check.get('picker_opened')}",
+                            f"all_tab_selected={bridging_token_check.get('all_tab_selected')}",
+                            f"assets_loaded={bridging_token_check.get('assets_loaded')}",
+                            f"base_usdc_selected={bridging_token_check.get('base_usdc_selected')}",
+                            f"source_token_selected={bridging_token_check.get('source_token_selected')}",
+                            f"source_amount_entered={bridging_token_check.get('source_amount_entered')}",
+                            f"receive_picker_opened={bridging_token_check.get('receive_picker_opened')}",
+                            f"base_eth_selected={bridging_token_check.get('base_eth_selected')}",
+                            f"receive_token_selected={bridging_token_check.get('receive_token_selected')}",
+                            f"quote_fetched={bridging_token_check.get('quote_fetched')}",
+                            f"review_swap_clicked={bridging_token_check.get('review_swap_clicked')}",
+                        ]
+                    )
+                )
+            ),
+        },
+        {
+            "id": "EXP-U10",
+            "name": "USDC Bridge Execution",
+            "status": "PASS" if bridge_execution_passed else "FAIL",
+            "notes": (
+                "Swap configured, Review swap opened, Swap now clicked, wallet signatures approved, and Swap Complete with Done button shown."
+                if bridge_execution_passed
+                else (
+                    "EXP-U10 checks: "
+                    + ", ".join(
+                        [
+                            f"picker_opened={bridge_execution_check.get('picker_opened')}",
+                            f"all_tab_selected={bridge_execution_check.get('all_tab_selected')}",
+                            f"assets_loaded={bridge_execution_check.get('assets_loaded')}",
+                            f"base_usdc_selected={bridge_execution_check.get('base_usdc_selected')}",
+                            f"source_token_selected={bridge_execution_check.get('source_token_selected')}",
+                            f"source_amount_entered={bridge_execution_check.get('source_amount_entered')}",
+                            f"receive_picker_opened={bridge_execution_check.get('receive_picker_opened')}",
+                            f"base_eth_selected={bridge_execution_check.get('base_eth_selected')}",
+                            f"receive_token_selected={bridge_execution_check.get('receive_token_selected')}",
+                            f"quote_fetched={bridge_execution_check.get('quote_fetched')}",
+                            f"review_swap_clicked={bridge_execution_check.get('review_swap_clicked')}",
+                            f"review_page_loaded={bridge_execution_check.get('review_page_loaded')}",
+                            f"swap_now_clicked={bridge_execution_check.get('swap_now_clicked')}",
+                            f"wallet_signatures_approved={bridge_execution_check.get('wallet_signatures_approved')}",
+                            f"swapping_seen={bridge_execution_check.get('swapping_seen')}",
+                            f"swap_complete_shown={bridge_execution_check.get('swap_complete_shown')}",
+                        ]
+                    )
+                )
+            ),
+        },
+        {
+            "id": "EXP-U11",
+            "name": "ETH Bridge Execution",
+            "status": "PASS" if bridge_execution_passed else "FAIL",
+            "notes": (
+                "Base ETH source configured, Base USDC receive selected, Swap now executed, and Swap Complete with Done button shown."
+                if bridge_execution_passed
+                else (
+                    "EXP-U11 checks: "
+                    + ", ".join(
+                        [
+                            f"picker_opened={bridge_execution_check.get('picker_opened')}",
+                            f"all_tab_selected={bridge_execution_check.get('all_tab_selected')}",
+                            f"assets_loaded={bridge_execution_check.get('assets_loaded')}",
+                            f"source_token_selected={bridge_execution_check.get('source_token_selected')}",
+                            f"source_amount_entered={bridge_execution_check.get('source_amount_entered')}",
+                            f"receive_picker_opened={bridge_execution_check.get('receive_picker_opened')}",
+                            f"receive_token_selected={bridge_execution_check.get('receive_token_selected')}",
+                            f"quote_fetched={bridge_execution_check.get('quote_fetched')}",
+                            f"review_swap_clicked={bridge_execution_check.get('review_swap_clicked')}",
+                            f"review_page_loaded={bridge_execution_check.get('review_page_loaded')}",
+                            f"swap_now_clicked={bridge_execution_check.get('swap_now_clicked')}",
+                            f"wallet_signatures_approved={bridge_execution_check.get('wallet_signatures_approved')}",
+                            f"swapping_seen={bridge_execution_check.get('swapping_seen')}",
+                            f"swap_complete_shown={bridge_execution_check.get('swap_complete_shown')}",
                         ]
                     )
                 )
