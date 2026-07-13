@@ -4,3 +4,7 @@ __pycache__/
 .env
 .cursor
 .idea
+.venv/
+
+# Live harness output (keep any already-tracked sample bundles)
+fastbridge-report-artifacts/fastbridge-report-*/

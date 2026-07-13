@@ -31,13 +31,38 @@ JSON_REPORT_PATH = REPORT_BUNDLE_DIR / "report.json"
 MD_REPORT_PATH = REPORT_BUNDLE_DIR / "report.md"
 HTML_REPORT_PATH = REPORT_BUNDLE_DIR / "index.html"
 EXPECTATIONS_HTML_PATH = REPORT_BUNDLE_DIR / "expectations.html"
-DESTINATION_SLUG = os.environ.get("FASTBRIDGE_DEST_SLUG", "base").strip().strip("/")
+SCENARIO_ID = os.environ.get("FASTBRIDGE_SCENARIO", "").strip().upper()
+SCENARIO_DEFAULTS = {
+    "EXP-U05": {
+        "dest": "optimism",
+        "amount": "0.0001",
+        "asset": "ETH",
+        "source_chain": "Base",
+        "receive_asset": "ETH",
+        "receive_chain": "Optimism",
+    },
+}
+_scenario = SCENARIO_DEFAULTS.get(SCENARIO_ID, {})
+DESTINATION_SLUG = os.environ.get("FASTBRIDGE_DEST_SLUG", _scenario.get("dest", "base")).strip().strip("/")
 BASE_URL = f"https://fastbridge.availproject.org/{DESTINATION_SLUG}/"
-BRIDGE_AMOUNT = os.environ.get("FASTBRIDGE_BRIDGE_AMOUNT", "0.1").strip()
+BRIDGE_AMOUNT = os.environ.get("FASTBRIDGE_BRIDGE_AMOUNT", _scenario.get("amount", "0.1")).strip()
+ASSET_SYMBOL = os.environ.get("FASTBRIDGE_ASSET", _scenario.get("asset", "USDC")).strip().upper() or "USDC"
+SOURCE_CHAIN = os.environ.get("FASTBRIDGE_SOURCE_CHAIN", _scenario.get("source_chain", "")).strip()
+RECEIVE_ASSET = (
+    os.environ.get("FASTBRIDGE_RECEIVE_ASSET", _scenario.get("receive_asset", ASSET_SYMBOL)).strip().upper()
+    or ASSET_SYMBOL
+)
+RECEIVE_CHAIN = os.environ.get("FASTBRIDGE_RECEIVE_CHAIN", _scenario.get("receive_chain", "")).strip()
 STOP_BEFORE_EXECUTION = os.environ.get("FASTBRIDGE_STOP_BEFORE_EXECUTION", "").strip().lower() in {"1", "true", "yes", "quote", "review"}
 QUOTE_READY_TIMEOUT_MS = int(os.environ.get("FASTBRIDGE_QUOTE_READY_TIMEOUT_MS", "15000"))
 NAVIGATION_TIMEOUT_MS = int(os.environ.get("FASTBRIDGE_NAVIGATION_TIMEOUT_MS", "45000"))
 POST_LOAD_NETWORK_IDLE_TIMEOUT_MS = int(os.environ.get("FASTBRIDGE_POST_LOAD_NETWORK_IDLE_TIMEOUT_MS", "10000"))
+IS_EXP_U05_RUN = SCENARIO_ID == "EXP-U05" or (
+    ASSET_SYMBOL == "ETH"
+    and SOURCE_CHAIN.lower() == "base"
+    and DESTINATION_SLUG in {"optimism", "op-mainnet"}
+    and RECEIVE_ASSET == "ETH"
+)
 
 CHAIN_CONFIG = {
     1: {"name": "Ethereum", "rpc": "https://1rpc.io/eth"},
@@ -122,6 +147,18 @@ EXPECTATION_CATALOG = [
         "name": "Error messages are user-readable",
         "category": "UI",
         "description": "If a user-facing action fails or the journey is blocked, the app should surface a clear, human-readable explanation and next step.",
+    },
+    {
+        "id": "EXP-U04",
+        "name": "Send view - Add assets",
+        "category": "UI",
+        "description": "Fastbridge page shows up after wallet is connected with 'Swap and Bridge' label, having 'Send' and 'Receive' view",
+    },
+    {
+        "id": "EXP-U05",
+        "name": "Send view - Add assets - ETH",
+        "category": "UI",
+        "description": "Fastbridge page shows up after wallet is connected with 'Swap and Bridge' label, having 'Send' and 'Receive' view; Execute bridge for 0.0001 ETH from 'Base' to 'Optimism'",
     },
 ]
 
@@ -242,6 +279,7 @@ def humanize_destination(slug: str) -> str:
         "ethereum": "Ethereum",
         "arbitrum": "Arbitrum",
         "op-mainnet": "OP Mainnet",
+        "optimism": "Optimism",
         "polygon": "Polygon",
         "avalanche": "Avalanche",
         "bnb-smart-chain": "BNB Smart Chain",
@@ -256,8 +294,22 @@ def humanize_destination(slug: str) -> str:
 
 
 def extract_total_usdc(text: str) -> Optional[str]:
-    match = re.search(r"\n([0-9]+(?:\.[0-9]+)?) USDC\n\nMAX", text)
-    return match.group(1) if match else None
+    return extract_total_balance(text, "USDC")
+
+
+def extract_total_balance(text: str, symbol: str = ASSET_SYMBOL) -> Optional[str]:
+    token = re.escape(symbol)
+    patterns = [
+        rf"\n([0-9]+(?:\.[0-9]+)?)\s+{token}\n\nMAX",
+        rf"Balance\s*·\s*\n?\s*([0-9]+(?:\.[0-9]+)?)\s+{token}",
+        rf"{token}\nUNIFIED\n\d+\s+chains\n([0-9]+(?:\.[0-9]+)?)\s+{token}",
+        rf"{token}\n[A-Za-z ]+\n([0-9]+(?:\.[0-9]+)?)\s+{token}",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
 
 
 def extract_first(pattern: str, text: str) -> Optional[str]:
@@ -265,41 +317,81 @@ def extract_first(pattern: str, text: str) -> Optional[str]:
     return match.group(1).strip() if match else None
 
 
-def extract_quote_details(text: str) -> Dict[str, Any]:
+def extract_quote_details(
+    text: str,
+    symbol: str = ASSET_SYMBOL,
+    receive_symbol: Optional[str] = None,
+) -> Dict[str, Any]:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
+    spend_token = re.escape(symbol)
+    recv_token = re.escape(receive_symbol or symbol)
+    spend_amount_re = rf"[0-9]+(?:\.[0-9]+)?\s+{spend_token}"
+    recv_amount_re = rf"[0-9]+(?:\.[0-9]+)?\s+{recv_token}"
 
-    def find_label(label: str) -> Optional[int]:
+    def find_label(*labels: str) -> Optional[int]:
+        wanted = {label.lower() for label in labels}
         for index, line in enumerate(lines):
-            if line.lower() == label.lower():
+            if line.lower() in wanted:
                 return index
         return None
 
-    def first_amount_after(label: str, stop_labels: Optional[List[str]] = None) -> Optional[str]:
-        start = find_label(label)
+    def first_amount_after(
+        labels: List[str],
+        stop_labels: Optional[List[str]] = None,
+        *,
+        amount_re: str,
+        allow_usd: bool = False,
+    ) -> Optional[str]:
+        start = find_label(*labels)
         if start is None:
             return None
         stop_label_set = {item.lower() for item in (stop_labels or [])}
+        pattern = (
+            rf"(?:[<>]?\$?[0-9]+(?:\.[0-9]+)?\s*USD[C]?|[<>]?\$[0-9]+(?:\.[0-9]+)?|{amount_re})"
+            if allow_usd
+            else amount_re
+        )
         for line in lines[start + 1 :]:
             if line.lower() in stop_label_set:
                 return None
-            if re.fullmatch(r"[0-9]+(?:\.[0-9]+)? USDC", line):
+            if re.fullmatch(pattern, line, re.IGNORECASE):
                 return line
         return None
 
-    spend_index = find_label("You Spend")
-    receive_index = find_label("You receive")
-    fees_index = find_label("Total fees")
-    amount_spent = first_amount_after("You Spend", ["You receive", "Total fees"])
-    amount_received = first_amount_after("You receive", ["Total fees"])
-    total_fees = first_amount_after("Total fees")
+    spend_labels = ["You Spend", "You Swap"]
+    receive_labels = ["You receive", "You Receive"]
+    fee_labels = ["Total fees", "Total Fees"]
+    spend_index = find_label(*spend_labels)
+    receive_index = find_label(*receive_labels)
+    fees_index = find_label(*fee_labels)
+    amount_spent = first_amount_after(spend_labels, receive_labels + fee_labels, amount_re=spend_amount_re)
+    amount_received = first_amount_after(receive_labels, fee_labels, amount_re=recv_amount_re)
+    total_fees = first_amount_after(
+        fee_labels,
+        ["Price Impact", "Swap Impact", "Max. Slippage"],
+        amount_re=spend_amount_re,
+        allow_usd=True,
+    )
 
+    skip_source = {
+        "MAX",
+        "Bridge",
+        "Deny",
+        "Accept",
+        "Refreshing...",
+        "Fetching intent...",
+        "Fetching quotes...",
+        "Review swap",
+        "Swap now",
+        "View Details",
+    }
     source_summary = None
     if spend_index is not None:
         stop = receive_index if receive_index is not None else len(lines)
         for line in lines[spend_index + 1 : stop]:
             if line == amount_spent:
                 continue
-            if line in {"MAX", "Bridge", "Deny", "Accept", "Refreshing...", "Fetching intent..."}:
+            if line in skip_source or re.fullmatch(r"[0-9]+(?:\.[0-9]+)? USD", line):
                 continue
             source_summary = line
             break
@@ -313,9 +405,10 @@ def extract_quote_details(text: str) -> Dict[str, Any]:
             if line.lower().startswith("on "):
                 destination_shown = line[3:].strip()
                 break
-            if line not in {"Deny", "Accept", "Refreshing...", "Fetching intent..."}:
-                destination_shown = line
-                break
+            if line in skip_source or re.fullmatch(r"[0-9]+(?:\.[0-9]+)? USD", line):
+                continue
+            destination_shown = line
+            break
 
     parse_errors = []
     if amount_spent is None:
@@ -336,13 +429,18 @@ def extract_quote_details(text: str) -> Dict[str, Any]:
     }
 
 
-def extract_best_quote(step_log: List[Dict[str, Any]]) -> Dict[str, Any]:
+def extract_best_quote(
+    step_log: List[Dict[str, Any]],
+    symbol: str = ASSET_SYMBOL,
+    receive_symbol: Optional[str] = None,
+) -> Dict[str, Any]:
     best_quote: Optional[Dict[str, Any]] = None
     best_label: Optional[str] = None
     best_score = -1
+    recv = receive_symbol or symbol
 
     for step in step_log:
-        quote = extract_quote_details(step.get("text", ""))
+        quote = extract_quote_details(step.get("text", ""), symbol=symbol, receive_symbol=recv)
         score = sum(1 for key in ("amountSpent", "amountReceived", "totalFees") if quote.get(key))
         if score >= best_score:
             best_quote = quote
@@ -352,38 +450,93 @@ def extract_best_quote(step_log: List[Dict[str, Any]]) -> Dict[str, Any]:
             best_quote = quote
             best_label = step.get("label")
 
-    quote = best_quote or extract_quote_details("")
+    quote = best_quote or extract_quote_details("", symbol=symbol, receive_symbol=recv)
     quote["evidenceLabel"] = best_label
     return quote
 
 
-def extract_completion_details(text: str) -> Dict[str, Optional[str]]:
+def extract_completion_details(text: str, symbol: str = ASSET_SYMBOL) -> Dict[str, Optional[str]]:
+    token = re.escape(symbol)
+    amount_received = extract_first(r"Amount Received: ([^\n]+)", text)
+    if amount_received is None:
+        match = re.search(
+            rf"You received\s*\n\s*([0-9]+(?:\.[0-9]+)?)\s*\n\s*{token}",
+            text,
+            re.IGNORECASE,
+        )
+        if match:
+            amount_received = f"{match.group(1)} {symbol}"
+
+    amount_spent = extract_first(r"Amount Spent: ([^\n]+)", text)
+    if amount_spent is None:
+        match = re.search(
+            rf"You Swapped[\s\S]*?\n([0-9]+(?:\.[0-9]+)?\s+{token})\s*\n",
+            text,
+            re.IGNORECASE,
+        )
+        if match:
+            amount_spent = match.group(1)
+
+    total_fees = extract_first(r"Total Fees: ([^\n]+)", text)
+    if total_fees is None:
+        match = re.search(r"Total Fees\s*\n\s*([^\n]+)", text, re.IGNORECASE)
+        if match:
+            total_fees = match.group(1).strip()
+
+    destination = extract_first(r"Destination: ([^\n]+)", text)
+    if destination is None:
+        match = re.search(r"You received[\s\S]*?\non ([^\n]+)", text, re.IGNORECASE)
+        if match:
+            destination = match.group(1).strip()
+
+    source_chains = extract_first(r"Source\(s\): ([^\n]+)", text)
+    if source_chains is None:
+        match = re.search(r"You Swapped[\s\S]*?\non ([^\n]+)", text, re.IGNORECASE)
+        if match:
+            source_chains = match.group(1).strip()
+
     return {
-        "sourceChains": extract_first(r"Source\(s\): ([^\n]+)", text),
-        "destination": extract_first(r"Destination: ([^\n]+)", text),
-        "asset": extract_first(r"Asset: ([^\n]+)", text),
-        "amountSpent": extract_first(r"Amount Spent: ([^\n]+)", text),
-        "amountReceived": extract_first(r"Amount Received: ([^\n]+)", text),
-        "totalFees": extract_first(r"Total Fees: ([^\n]+)", text),
+        "sourceChains": source_chains,
+        "destination": destination,
+        "asset": extract_first(r"Asset: ([^\n]+)", text) or (symbol if amount_received else None),
+        "amountSpent": amount_spent,
+        "amountReceived": amount_received,
+        "totalFees": total_fees,
     }
 
 
-def extract_breakdown_rows(text: str) -> List[Dict[str, str]]:
+def extract_breakdown_rows(text: str, symbol: str = ASSET_SYMBOL) -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
     lines = [line.strip() for line in text.splitlines()]
+    token = re.escape(symbol)
     ignored = {
         "",
         "MAX",
         "USDC",
+        "USDT",
+        "ETH",
+        symbol,
         "View Balance Breakdown",
         "Recipient Address",
         "Bridge",
         "Powered by",
         "Reach out to us if",
         "you face any issues",
+        "Choose assets to send",
+        "Select token to receive",
+        "All chains",
+        "All",
+        "Native",
+        "Stables",
+        "UNIFIED",
+        "SEND",
+        "RECEIVE",
+        "RECIPIENT",
+        "Swap and Bridge",
     }
+    amount_re = re.compile(rf"[0-9]+(?:\.[0-9]+)?\s+{token}", re.IGNORECASE)
     for index, line in enumerate(lines):
-        if line in ignored:
+        if line in ignored or re.search(r"\bchains?\b", line, re.IGNORECASE):
             continue
         next_value = None
         for candidate in lines[index + 1 :]:
@@ -391,7 +544,7 @@ def extract_breakdown_rows(text: str) -> List[Dict[str, str]]:
                 continue
             next_value = candidate
             break
-        if next_value and re.fullmatch(r"[0-9]+(?:\.[0-9]+)? USDC", next_value):
+        if next_value and amount_re.fullmatch(next_value):
             rows.append({"chain": line, "balance": next_value})
     seen = set()
     unique_rows = []
@@ -575,6 +728,11 @@ def find_button(page: Page, name: str):
     return locator.first if locator.count() > 0 else None
 
 
+def find_button_matching(page: Page, pattern: str):
+    locator = page.get_by_role("button", name=re.compile(pattern, re.IGNORECASE))
+    return locator.first if locator.count() > 0 else None
+
+
 def button_is_ready(button: Any) -> bool:
     if not button:
         return False
@@ -584,23 +742,201 @@ def button_is_ready(button: Any) -> bool:
         return False
 
 
-def wait_for_quote_ready(page: Page, timeout_ms: int = QUOTE_READY_TIMEOUT_MS) -> Dict[str, Any]:
-    start = time.monotonic()
+def click_ready_button(page: Page, button: Any, timeout_ms: int = 15000) -> bool:
+    if not button:
+        return False
+    try:
+        button.wait_for(state="visible", timeout=timeout_ms)
+        deadline = time.monotonic() + (timeout_ms / 1000)
+        while time.monotonic() < deadline:
+            if button_is_ready(button):
+                try:
+                    button.click(timeout=3000)
+                    return True
+                except PlaywrightTimeoutError:
+                    page.wait_for_timeout(250)
+            else:
+                page.wait_for_timeout(250)
+        button.click(force=True, timeout=3000)
+        return True
+    except Exception:
+        return False
+
+
+def find_send_amount_input(page: Page):
+    legacy = page.locator("input[placeholder='Enter Amount']")
+    if legacy.count() > 0 and legacy.first.is_visible():
+        return legacy.first
+    candidates = page.locator("input[placeholder='0']")
+    for index in range(candidates.count()):
+        candidate = candidates.nth(index)
+        try:
+            if candidate.is_visible() and candidate.is_enabled() and candidate.is_editable():
+                return candidate
+        except Exception:
+            continue
+    return candidates.first if candidates.count() > 0 else None
+
+
+def select_send_asset(
+    page: Page,
+    symbol: str = ASSET_SYMBOL,
+    source_chain: str = SOURCE_CHAIN,
+) -> Dict[str, Any]:
+    assets_button = find_button_matching(page, r"^Assets$")
+    if button_is_ready(assets_button):
+        assets_button.click()
+        page.wait_for_timeout(1200)
+    # Wait for picker rows if still loading.
     try:
         page.wait_for_function(
-            """() => {
+            "() => !(document.body.innerText || '').includes('Loading assets')",
+            timeout=15000,
+        )
+    except PlaywrightTimeoutError:
+        pass
+    if symbol.upper() == "ETH" or source_chain:
+        native = find_button_matching(page, r"^Native$")
+        if button_is_ready(native):
+            native.click()
+            page.wait_for_timeout(600)
+    picker = wait_and_capture(page, f"{DESTINATION_SLUG}-asset-picker", 300)
+
+    target = None
+    if source_chain:
+        chain_pattern = re.compile(re.escape(source_chain), re.I)
+        symbol_pattern = re.compile(rf"\b{re.escape(symbol)}\b", re.I)
+        amount_pattern = re.compile(r"0\.\d+|\d+\.\d+")
+        candidates = page.locator("button").filter(has_text=symbol_pattern).filter(has_text=chain_pattern)
+        for index in range(candidates.count()):
+            candidate = candidates.nth(index)
+            text = candidate.inner_text()
+            if "UNIFIED" in text:
+                continue
+            if amount_pattern.search(text) or source_chain.lower() in text.lower():
+                target = candidate
+                break
+        if target is None and candidates.count() > 0:
+            target = candidates.first
+    else:
+        unified = find_button_matching(page, rf"{re.escape(symbol)}\s+UNIFIED")
+        if button_is_ready(unified):
+            target = unified
+        else:
+            fallback = page.locator("button", has_text=re.compile(r"UNIFIED", re.I)).filter(
+                has_text=re.compile(rf"\b{re.escape(symbol)}\b", re.I)
+            )
+            if fallback.count() == 0:
+                raise RuntimeError(f"Unified {symbol} asset option was not found in the Send assets picker.")
+            target = fallback.first
+
+    if target is None:
+        raise RuntimeError(
+            f"Send asset option was not found for {symbol}"
+            + (f" on {source_chain}" if source_chain else " (unified)")
+            + "."
+        )
+    target.click()
+    page.wait_for_timeout(1200)
+    return picker
+
+
+def select_receive_asset(
+    page: Page,
+    symbol: str = RECEIVE_ASSET,
+    receive_chain: str = RECEIVE_CHAIN,
+) -> Optional[Dict[str, Any]]:
+    if not symbol:
+        return None
+
+    # Click the receive-side token chip (lower on the page than send).
+    chip_candidates = []
+    for label in ("USDC", "ETH", "USDT", symbol):
+        locator = page.locator("button").filter(has_text=re.compile(rf"^{re.escape(label)}$", re.I))
+        for index in range(locator.count()):
+            chip = locator.nth(index)
+            try:
+                if not chip.is_visible():
+                    continue
+                box = chip.bounding_box() or {"y": 0}
+                chip_candidates.append((box.get("y", 0), label.upper(), chip))
+            except Exception:
+                continue
+    if not chip_candidates:
+        raise RuntimeError("Receive token chip was not found.")
+    chip_candidates.sort(key=lambda item: item[0])
+    # Prefer a non-send symbol chip when present; otherwise the lowest chip.
+    preferred = [item for item in chip_candidates if item[1] != symbol.upper()]
+    receive_chip = (preferred[-1] if preferred else chip_candidates[-1])[2]
+    receive_chip.click()
+    page.get_by_text("Select token to receive").first.wait_for(state="visible", timeout=10000)
+    page.wait_for_timeout(500)
+
+    if symbol.upper() == "ETH" or receive_chain:
+        native = find_button_matching(page, r"^Native$")
+        if button_is_ready(native):
+            native.click()
+            page.wait_for_timeout(600)
+    search = page.locator("input[placeholder*='Search']")
+    if search.count() > 0 and search.first.is_visible():
+        search.first.fill(symbol)
+        page.wait_for_timeout(1000)
+
+    target = None
+    if receive_chain:
+        for button in page.locator("button").all():
+            try:
+                if not button.is_visible():
+                    continue
+            except Exception:
+                continue
+            text = button.inner_text()
+            if re.search(rf"\b{re.escape(symbol)}\b", text, re.I) and re.search(
+                rf"\bon\s+{re.escape(receive_chain)}\b", text, re.I
+            ):
+                target = button
+                break
+    if target is None:
+        raise RuntimeError(
+            f"Receive asset option was not found for {symbol}"
+            + (f" on {receive_chain}" if receive_chain else "")
+            + "."
+        )
+    target.click(force=True)
+    page.wait_for_timeout(1200)
+    body_text = page.locator("body").inner_text()
+    if not re.search(rf"RECEIVE\s*\n\s*{re.escape(symbol)}\b", body_text, re.I):
+        raise RuntimeError(f"Receive asset did not switch to {symbol} after selection.")
+    return wait_and_capture(page, f"{DESTINATION_SLUG}-receive-asset", 300)
+
+
+def wait_for_quote_ready(page: Page, timeout_ms: int = QUOTE_READY_TIMEOUT_MS) -> Dict[str, Any]:
+    start = time.monotonic()
+    token = ASSET_SYMBOL
+    try:
+        page.wait_for_function(
+            """(token) => {
               const text = document.body.innerText || "";
-              const amountMatches = text.match(/[0-9]+(?:\\.[0-9]+)?\\s+USDC/g) || [];
-              const acceptReady = Array.from(document.querySelectorAll("button")).some((button) => {
+              const buttons = Array.from(document.querySelectorAll("button"));
+              const enabledLabel = (wanted) => buttons.some((button) => {
                 const label = (button.innerText || button.textContent || "").trim();
-                return label === "Accept" && !button.disabled && button.getAttribute("aria-disabled") !== "true";
+                return label === wanted && !button.disabled && button.getAttribute("aria-disabled") !== "true";
               });
-              return acceptReady
+              const amountMatches = text.match(new RegExp(`[0-9]+(?:\\\\.[0-9]+)?\\\\s+${token}`, 'g')) || [];
+              const legacyAcceptReady = enabledLabel("Accept")
                 && text.includes("You Spend")
                 && text.includes("You receive")
                 && text.includes("Total fees")
                 && amountMatches.length >= 3;
+              const reviewCtaReady = enabledLabel("Review swap");
+              const confirmReady = enabledLabel("Swap now")
+                && (text.includes("You Swap") || text.includes("You Spend"))
+                && (text.includes("You Receive") || text.includes("You receive"))
+                && (text.includes("Total Fees") || text.includes("Total fees"))
+                && amountMatches.length >= 2;
+              return legacyAcceptReady || reviewCtaReady || confirmReady;
             }""",
+            arg=token,
             timeout=timeout_ms,
         )
         return {"ready": True, "elapsedMs": int((time.monotonic() - start) * 1000), "timeoutMs": timeout_ms}
@@ -609,7 +945,7 @@ def wait_for_quote_ready(page: Page, timeout_ms: int = QUOTE_READY_TIMEOUT_MS) -
             "ready": False,
             "elapsedMs": int((time.monotonic() - start) * 1000),
             "timeoutMs": timeout_ms,
-            "reason": "Quote did not reach an Accept-ready state before timeout.",
+            "reason": "Quote did not reach a Review swap / Swap now ready state before timeout.",
         }
 
 
@@ -1516,6 +1852,13 @@ def main():
         artifacts.append({"label": "Initial connected state", "path": initial["screenshot"]})
         step_log.append(initial)
 
+        # EXP-U04: after wallet connect, Send view should show Swap and Bridge with Send/Receive
+        initial_text_lower = initial["text"].lower()
+        has_swap_and_bridge_label = "swap and bridge" in initial_text_lower
+        has_send_view = bool(re.search(r"\bsend\b", initial["text"], re.IGNORECASE))
+        has_receive_view = bool(re.search(r"\breceive\b", initial["text"], re.IGNORECASE))
+        send_view_ready = has_swap_and_bridge_label and has_send_view and has_receive_view
+
         if "Initializing..." in initial["text"]:
             append_issue(
                 issues,
@@ -1540,7 +1883,22 @@ def main():
         else:
             breakdown = {"text": ""}
 
-        amount_input = page.locator("input[placeholder='Enter Amount']").first
+        # V2 Send view: open Assets picker, capture balances, select configured send asset
+        asset_picker = select_send_asset(page, symbol=ASSET_SYMBOL, source_chain=SOURCE_CHAIN)
+        artifacts.append({"label": "Send asset picker", "path": asset_picker["screenshot"]})
+        step_log.append(asset_picker)
+        if not breakdown.get("text"):
+            breakdown = asset_picker
+
+        if RECEIVE_CHAIN or RECEIVE_ASSET.upper() != "USDC" or ASSET_SYMBOL.upper() != "USDC":
+            receive_picker = select_receive_asset(page, symbol=RECEIVE_ASSET, receive_chain=RECEIVE_CHAIN)
+            if receive_picker:
+                artifacts.append({"label": "Receive asset picker", "path": receive_picker["screenshot"]})
+                step_log.append(receive_picker)
+
+        amount_input = find_send_amount_input(page)
+        if amount_input is None:
+            raise RuntimeError("Send amount input was not found after selecting assets.")
         quote_start = time.monotonic()
         amount_input.fill(BRIDGE_AMOUNT)
 
@@ -1548,7 +1906,9 @@ def main():
         amount_change_ms: Optional[int] = None
         ui_responsive_after_change = False
         try:
-            alternate_amount = str(round(float(BRIDGE_AMOUNT) + 0.01, 2))
+            amount_value = float(BRIDGE_AMOUNT)
+            delta = 0.00001 if amount_value < 0.01 else 0.01
+            alternate_amount = format(amount_value + delta, "f").rstrip("0").rstrip(".")
             change_start = time.monotonic()
             amount_input.fill(alternate_amount)
             ui_responsive_after_change = (
@@ -1564,7 +1924,9 @@ def main():
         mid_fetch_input_enabled: Optional[bool] = None
         mid_fetch_refetch_started: Optional[bool] = None
         try:
-            alternate_amount = str(round(float(BRIDGE_AMOUNT) + 0.01, 2))
+            amount_value = float(BRIDGE_AMOUNT)
+            delta = 0.00001 if amount_value < 0.01 else 0.01
+            alternate_amount = format(amount_value + delta, "f").rstrip("0").rstrip(".")
             page.wait_for_timeout(400)  # let quote fetch begin but not complete
             amount_input.fill(alternate_amount)
             mid_fetch_input_enabled = not amount_input.is_disabled()
@@ -1586,8 +1948,18 @@ def main():
         artifacts.append({"label": "After amount input", "path": after_amount["screenshot"]})
         step_log.append(after_amount)
 
+        # V2: Review swap opens confirm sheet; legacy: Bridge/Accept path
+        review_button = find_button_matching(page, r"^Review swap$")
         accept_button = find_button(page, "Accept")
-        if not button_is_ready(accept_button):
+        if button_is_ready(review_button):
+            review_button.click()
+            review_quote_wait = wait_for_quote_ready(page, timeout_ms=10000)
+            quote_waits.append({"stage": "review", **review_quote_wait})
+            quote_visible_ms = int((time.monotonic() - quote_start) * 1000)
+            review = wait_and_capture(page, f"{DESTINATION_SLUG}-review", 300)
+            artifacts.append({"label": "Review state", "path": review["screenshot"]})
+            step_log.append(review)
+        elif not button_is_ready(accept_button):
             bridge_button = find_button(page, "Bridge")
             if button_is_ready(bridge_button):
                 bridge_button.click()
@@ -1604,25 +1976,60 @@ def main():
             allowance = {"text": ""}
             post_approve = {"text": ""}
         else:
+            swap_now_button = find_button_matching(page, r"^Swap now$")
             accept_button = find_button(page, "Accept")
-            if button_is_ready(accept_button):
+            if button_is_ready(swap_now_button) or find_button_matching(page, r"^Swap now$"):
+                accept_attempted = True
+                execution_attempted = click_ready_button(page, find_button_matching(page, r"^Swap now$"), timeout_ms=20000)
+                if execution_attempted:
+                    execution_start = time.monotonic()
+                allowance = wait_and_capture(page, f"{DESTINATION_SLUG}-allowance", 4000)
+                artifacts.append({"label": "Post Swap now state", "path": allowance["screenshot"]})
+                step_log.append(allowance)
+                # V2 progress UI can linger on "Receiving..." after approvals; wait for a terminal state.
+                try:
+                    page.wait_for_function(
+                        """() => {
+                          const text = document.body.innerText || "";
+                          const terminal = [
+                            "Swap Complete",
+                            "Bridge Successful!",
+                            "Swap Successful",
+                            "Transaction Completed",
+                            "Oops! Something went wrong",
+                          ].some((marker) => text.includes(marker));
+                          const stillInFlight = text.includes("Swapping")
+                            || /Receiving [A-Z0-9.]+/i.test(text)
+                            || /Approve [A-Z0-9.]+ in wallet/i.test(text)
+                            || text.includes("Approve Swaps");
+                          return terminal || (!stillInFlight && text.includes("View Explorer"));
+                        }""",
+                        timeout=45000,
+                    )
+                except PlaywrightTimeoutError:
+                    pass
+                post_approve = wait_and_capture(page, f"{DESTINATION_SLUG}-post-approve", 1500)
+                artifacts.append({"label": "Post approval state", "path": post_approve["screenshot"]})
+                step_log.append(post_approve)
+            elif button_is_ready(accept_button):
                 accept_attempted = True
                 accept_button.click()
                 allowance = wait_and_capture(page, f"{DESTINATION_SLUG}-allowance", 4000)
                 artifacts.append({"label": "Allowance modal", "path": allowance["screenshot"]})
                 step_log.append(allowance)
+
+                approve_button = find_button(page, "Approve Selected")
+                if button_is_ready(approve_button):
+                    execution_attempted = True
+                    execution_start = time.monotonic()
+                    approve_button.click()
+                    post_approve = wait_and_capture(page, f"{DESTINATION_SLUG}-post-approve", 12000)
+                    artifacts.append({"label": "Post approval state", "path": post_approve["screenshot"]})
+                    step_log.append(post_approve)
+                else:
+                    post_approve = {"text": ""}
             else:
                 allowance = {"text": ""}
-
-            approve_button = find_button(page, "Approve Selected")
-            if button_is_ready(approve_button):
-                execution_attempted = True
-                execution_start = time.monotonic()
-                approve_button.click()
-                post_approve = wait_and_capture(page, f"{DESTINATION_SLUG}-post-approve", 12000)
-                artifacts.append({"label": "Post approval state", "path": post_approve["screenshot"]})
-                step_log.append(post_approve)
-            else:
                 post_approve = {"text": ""}
 
         final_state = wait_and_capture(page, f"{DESTINATION_SLUG}-final", 3000)
@@ -1640,7 +2047,17 @@ def main():
     worked = []
     summary = []
     final_text = final_state["text"]
-    bridge_successful = "Bridge Successful!" in final_text and "Transaction Completed" in final_text
+    bridge_successful = (
+        "Swap Complete" in final_text
+        or (("Bridge Successful!" in final_text or "Swap Successful" in final_text) and "Transaction Completed" in final_text)
+        or ("Transaction Completed" in final_text and "View Explorer" in final_text)
+        or (
+            "Swaps completed" in final_text
+            and "View Explorer" in final_text
+            and "Swapping" not in final_text
+            and "Receiving USDC" not in final_text
+        )
+    )
     used_gasless_flow = any(call["method"] in {"eth_signTypedData", "eth_signTypedData_v3", "eth_signTypedData_v4"} for call in provider_calls)
     user_facing_error_seen = any("Oops! Something went wrong. Please try again." in step["text"] for step in step_log)
     route_blocked_low_balance = any(
@@ -1648,7 +2065,7 @@ def main():
         or "Insufficient" in step.get("text", "")
         for step in step_log
     )
-    initial_quote = extract_best_quote(step_log)
+    initial_quote = extract_best_quote(step_log, symbol=ASSET_SYMBOL, receive_symbol=RECEIVE_ASSET)
     quote_parsed = bool(initial_quote.get("quoteParsed"))
     quote_ready_seen = any(item.get("ready") for item in quote_waits)
     sign_or_tx_attempted = used_gasless_flow or bool(tx_log)
@@ -1670,10 +2087,14 @@ def main():
         if accept_attempted or execution_attempted or sign_or_tx_attempted
         else "UNKNOWN"
     )
-    completion = extract_completion_details(final_text)
-    breakdown_rows = extract_breakdown_rows(breakdown["text"])
-    total_usdc = extract_total_usdc(initial["text"])
-    final_total_usdc = extract_total_usdc(final_text)
+    completion = extract_completion_details(final_text, symbol=RECEIVE_ASSET or ASSET_SYMBOL)
+    breakdown_rows = extract_breakdown_rows(breakdown["text"], symbol=ASSET_SYMBOL)
+    total_usdc = (
+        extract_total_balance(after_amount.get("text", ""), ASSET_SYMBOL)
+        or extract_total_balance(breakdown.get("text", ""), ASSET_SYMBOL)
+        or extract_total_balance(initial["text"], ASSET_SYMBOL)
+    )
+    final_total_usdc = extract_total_balance(final_text, ASSET_SYMBOL)
     quoted_receive = extract_numeric_amount(initial_quote.get("amountReceived"))
     actual_receive = extract_numeric_amount(completion.get("amountReceived"))
     quoted_fees = extract_numeric_amount(initial_quote.get("totalFees"))
@@ -1685,12 +2106,16 @@ def main():
         after_amount["screenshot"],
     )
 
-    if total_usdc and "View Balance Breakdown" in initial["text"]:
-        worked.append(f"Unified balance loaded in the live UI and surfaced a total of {total_usdc} USDC.")
-    if "View Balance Breakdown" in initial["text"] and breakdown["text"]:
-        worked.append("Balance breakdown opened successfully and exposed per-chain USDC balances.")
+    if total_usdc:
+        worked.append(f"Unified balance loaded in the live UI and surfaced a total of {total_usdc} {ASSET_SYMBOL}.")
+    if breakdown_rows:
+        worked.append(f"Send asset picker exposed per-chain {ASSET_SYMBOL} balances for the connected wallet.")
+    if send_view_ready:
+        worked.append("Connected Send view showed Swap and Bridge with Send and Receive.")
     if initial_quote.get("amountReceived"):
-        worked.append(f"A real {BRIDGE_AMOUNT} USDC route to {destination_name} was quoted successfully with spend, receive, and fee information.")
+        worked.append(
+            f"A real {BRIDGE_AMOUNT} {ASSET_SYMBOL} route to {destination_name} was quoted successfully with spend, receive, and fee information."
+        )
     if "Set Token Allowances" in allowance["text"] or "Allowance approved" in final_text:
         worked.append("The execution flow advanced into the token allowance step for the selected source chain.")
     if tx_log:
@@ -1698,9 +2123,13 @@ def main():
     if used_gasless_flow:
         worked.append("The wallet signed the typed-data request used during the allowance flow.")
     if bridge_successful:
-        worked.append(f"The bridge completed successfully in the live UI and the destination balance updated to include {BRIDGE_AMOUNT} USDC on {destination_name}.")
+        worked.append(
+            f"The bridge completed successfully in the live UI for {BRIDGE_AMOUNT} {ASSET_SYMBOL} to {destination_name}."
+        )
     if bridge_successful and used_gasless_flow and not tx_log:
         worked.append("This route completed without a direct wallet-broadcast transaction, which is consistent with a gasless permit-plus-relayer flow.")
+    if IS_EXP_U05_RUN and bridge_successful:
+        worked.append("EXP-U05 completed: 0.0001 ETH bridged from Base toward Optimism.")
 
     if any("Failed to load resource: the server responded with a status of 400" in item["text"] for item in console_errors):
         append_issue(
@@ -1739,16 +2168,16 @@ def main():
             issues,
             "Execution Attempt Did Not Submit A Transaction",
             "high",
-            "The flow reached the execution stage and Approve Selected was clicked, but no on-chain transaction was broadcast from the wallet in this run. The bridge therefore did not complete end to end.",
+            "The flow reached the execution stage and Swap now was clicked, but no on-chain transaction was broadcast from the wallet in this run. The bridge therefore did not complete end to end.",
             [
                 f"Open the {destination_name} route with the funded wallet connected.",
-                f"Enter {BRIDGE_AMOUNT} USDC.",
-                "Click Bridge, then Accept, then Approve Selected.",
-                "Observe whether an approval transaction is actually submitted and whether the flow continues.",
+                "Select unified USDC in Send assets, then enter the bridge amount.",
+                "Click Review swap, then Swap now.",
+                "Observe whether a transaction is actually submitted and whether the flow continues.",
             ],
             issue_id="FB-P0-001",
             evidence=post_approve["screenshot"],
-            root_cause="Execution stalled after approval selection and never reached a completed state.",
+            root_cause="Execution stalled after Swap now and never reached a completed state.",
         )
 
     if any("Oops! Something went wrong. Please try again." in step["text"] for step in step_log):
@@ -1759,8 +2188,8 @@ def main():
             "The app shows a generic failure message after execution errors. That message is visible to the user, but it does not explain whether the problem is allowance signing, bridge routing, wallet interaction, or backend failure.",
             [
                 f"Open the {destination_name} route with the funded wallet connected.",
-                f"Enter {BRIDGE_AMOUNT} USDC.",
-                "Click Bridge, then Accept, then Approve Selected.",
+                "Select unified USDC in Send assets, then enter the bridge amount.",
+                "Click Review swap, then Swap now.",
                 "If the operation fails, note that the UI shows only a generic error banner instead of a specific explanation.",
             ],
             issue_id="FB-P1-002",
@@ -1773,11 +2202,11 @@ def main():
             issues,
             "Quote Parser Could Not Read Settled Quote",
             "medium",
-            "The UI reached an Accept-ready quote state, but the harness could not parse spend, receive, and fee fields from the settled page text.",
+            "The UI reached a Review swap / confirm quote state, but the harness could not parse spend, receive, and fee fields from the settled page text.",
             [
                 f"Open the {destination_name} route with the funded wallet connected.",
-                f"Enter {BRIDGE_AMOUNT} USDC.",
-                "Wait until the Accept quote is visible.",
+                f"Select unified USDC and enter {BRIDGE_AMOUNT} USDC.",
+                "Wait until Review swap / Confirm Swap details are visible.",
                 "Compare the quote text against the parser labels in the harness.",
             ],
             issue_id="FB-H1-001",
@@ -1787,13 +2216,14 @@ def main():
     elif harness_outcome == "HARNESS_TIMEOUT" and not route_blocked_low_balance:
         append_issue(
             issues,
-            "Quote Did Not Reach Accept-Ready State",
+            "Quote Did Not Reach Review-Ready State",
             "medium",
-            "The harness did not observe a settled quote with an enabled Accept button before the timeout. This is classified as harness/product uncertainty, not a product execution failure.",
+            "The harness did not observe a settled quote with an enabled Review swap or Swap now button before the timeout. This is classified as harness/product uncertainty, not a product execution failure.",
             [
                 f"Open the {destination_name} route with the funded wallet connected.",
+                "Select unified USDC in Send assets.",
                 f"Enter {BRIDGE_AMOUNT} USDC.",
-                f"Wait up to {QUOTE_READY_TIMEOUT_MS} ms for the quote and Accept button.",
+                f"Wait up to {QUOTE_READY_TIMEOUT_MS} ms for Review swap / Swap now.",
                 "Inspect the captured final UI state before deciding whether the product or harness is at fault.",
             ],
             issue_id="FB-H1-002",
@@ -1805,12 +2235,12 @@ def main():
             issues,
             "Execution Was Not Attempted After Quote",
             "medium",
-            "A parseable quote was captured in full-execution mode, but the harness did not click Accept or reach the allowance/execution path.",
+            "A parseable quote was captured in full-execution mode, but the harness did not click Swap now or reach the execution path.",
             [
                 f"Open the {destination_name} route with the funded wallet connected.",
-                f"Enter {BRIDGE_AMOUNT} USDC.",
+                f"Select unified USDC and enter {BRIDGE_AMOUNT} USDC.",
                 "Wait for the quote to settle.",
-                "Confirm whether the Accept button is enabled and clickable.",
+                "Confirm whether Swap now is enabled and clickable.",
             ],
             issue_id="FB-H1-003",
             evidence=quote_evidence,
@@ -1819,13 +2249,13 @@ def main():
 
     summary.append(f"Unified balance aggregation is working for this wallet on the {destination_name} route.")
     if quote_parsed:
-        summary.append(f"The quote path for sending {BRIDGE_AMOUNT} USDC to {destination_name} works and the information shown is complete enough to review the route.")
+        summary.append(f"The quote path for sending {BRIDGE_AMOUNT} {ASSET_SYMBOL} to {destination_name} works and the information shown is complete enough to review the route.")
     elif route_blocked_low_balance:
         summary.append("The route was blocked before quote review because no eligible funded source chain was available for this destination.")
     else:
         summary.append("The tester did not capture a parseable settled quote, so quote correctness is unresolved rather than a product execution failure.")
     if STOP_BEFORE_EXECUTION:
-        summary.append("Quote-only mode stopped before Accept / Approve Selected, so no live transaction was attempted by design.")
+        summary.append("Quote-only mode stopped before Swap now, so no live transaction was attempted by design.")
     elif bridge_successful:
         summary.append("The end-to-end bridge transaction completed successfully and the UI balance updated on the destination chain.")
     elif tx_log:
@@ -1840,7 +2270,7 @@ def main():
             "label": "Landing page and wallet state",
             "status": "PASS" if total_usdc else "FAIL",
             "evidence": initial["screenshot"],
-            "notes": f"Unified balance shown as {total_usdc} USDC." if total_usdc else "Unified balance did not load.",
+            "notes": f"Unified balance shown as {total_usdc} {ASSET_SYMBOL}." if total_usdc else "Unified balance did not load.",
         },
         {
             "label": "Balance breakdown panel",
@@ -1856,9 +2286,9 @@ def main():
         },
         {
             "label": "Allowance review",
-            "status": "NA" if STOP_BEFORE_EXECUTION else ("PASS" if "Set Token Allowances" in allowance["text"] else ("HARNESS_TIMEOUT" if product_outcome == "UNKNOWN" else "PARTIAL")),
+            "status": "NA" if STOP_BEFORE_EXECUTION else ("PASS" if "Set Token Allowances" in allowance["text"] or "Swap now" in review.get("text", "") or execution_attempted else ("HARNESS_TIMEOUT" if product_outcome == "UNKNOWN" else "PARTIAL")),
             "evidence": allowance.get("screenshot", review.get("screenshot", after_amount["screenshot"])),
-            "notes": "Quote-only mode stopped before allowance review." if STOP_BEFORE_EXECUTION else ("Allowance modal rendered with approval options." if "Set Token Allowances" in allowance["text"] else "Allowance modal was not observed in this run."),
+            "notes": "Quote-only mode stopped before Swap now." if STOP_BEFORE_EXECUTION else ("Allowance modal rendered with approval options." if "Set Token Allowances" in allowance["text"] else ("Swap now execution was attempted." if execution_attempted else "Allowance / Swap now continuation was not observed in this run.")),
         },
         {
             "label": "Execution completion",
@@ -1882,7 +2312,7 @@ def main():
             "notes": (
                 "Quote-only mode stopped before completion, so balance refresh was not evaluated."
                 if STOP_BEFORE_EXECUTION
-                else f"Unified balance changed from {total_usdc} USDC to {final_total_usdc} USDC after completion."
+                else f"Unified balance changed from {total_usdc} {ASSET_SYMBOL} to {final_total_usdc} {ASSET_SYMBOL} after completion."
                 if bridge_successful and initial_unified_numeric is not None and final_unified_numeric is not None and final_unified_numeric != initial_unified_numeric
                 else ("Run did not complete, so balance refresh could not be evaluated." if not bridge_successful else "Completion occurred, but the unified balance did not visibly change.")
             ),
@@ -1948,7 +2378,7 @@ def main():
             "id": "EXP-D03",
             "name": "Unified balance and breakdown are visible",
             "status": "PASS" if total_usdc and breakdown_rows else "PARTIAL",
-            "notes": f"Initial unified {total_usdc or 'unknown'} USDC; breakdown rows captured: {len(breakdown_rows)}.",
+            "notes": f"Initial unified {total_usdc or 'unknown'} {ASSET_SYMBOL}; breakdown rows captured: {len(breakdown_rows)}.",
         },
         {
             "id": "EXP-U02",
@@ -1967,6 +2397,50 @@ def main():
             "name": "Error messages are user-readable",
             "status": "FAIL" if user_facing_error_seen else "PASS",
             "notes": "A user-facing failure banner was shown, but it did not explain the specific cause or recovery path." if user_facing_error_seen else "No user-facing action failure was observed in this run.",
+        },
+        {
+            "id": "EXP-U04",
+            "name": "Send view - Add assets",
+            "status": "PASS" if send_view_ready else "FAIL",
+            "notes": (
+                "Connected Send view showed 'Swap and Bridge' with Send and Receive."
+                if send_view_ready
+                else (
+                    "Missing after wallet connect: "
+                    + ", ".join(
+                        part
+                        for part, present in (
+                            ("'Swap and Bridge' label", has_swap_and_bridge_label),
+                            ("Send view", has_send_view),
+                            ("Receive view", has_receive_view),
+                        )
+                        if not present
+                    )
+                    + "."
+                )
+            ),
+        },
+        {
+            "id": "EXP-U05",
+            "name": "Send view - Add assets - ETH",
+            "status": (
+                "PASS"
+                if IS_EXP_U05_RUN and send_view_ready and (bridge_successful or (STOP_BEFORE_EXECUTION and quote_parsed))
+                else "FAIL"
+                if IS_EXP_U05_RUN
+                else "NA"
+            ),
+            "notes": (
+                (
+                    f"Send view ready; bridged {BRIDGE_AMOUNT} {ASSET_SYMBOL} from {SOURCE_CHAIN or 'configured source'} to {destination_name}."
+                    if bridge_successful
+                    else f"Send view ready; quote captured for {BRIDGE_AMOUNT} {ASSET_SYMBOL} Base→Optimism in quote-only mode."
+                    if STOP_BEFORE_EXECUTION and quote_parsed
+                    else f"EXP-U05 run did not complete the {BRIDGE_AMOUNT} ETH Base→Optimism path."
+                )
+                if IS_EXP_U05_RUN
+                else "Not applicable unless FASTBRIDGE_SCENARIO=EXP-U05 (or ETH Base→Optimism config)."
+            ),
         },
         {
             "id": "EXP-T01",
@@ -2009,7 +2483,7 @@ def main():
     )
 
     result = {
-        "scenarioId": f"FB-USDC-{DESTINATION_SLUG.upper()}-001",
+        "scenarioId": SCENARIO_ID or f"FB-{ASSET_SYMBOL}-{DESTINATION_SLUG.upper()}-001",
         "executionMode": "quote-only" if STOP_BEFORE_EXECUTION else "full",
         "status": result_status,
         "productOutcome": product_outcome,
@@ -2021,6 +2495,10 @@ def main():
         "destinationName": destination_name,
         "address": account_address,
         "bridgeAmount": BRIDGE_AMOUNT,
+        "assetSymbol": ASSET_SYMBOL,
+        "sourceChain": SOURCE_CHAIN or None,
+        "receiveAsset": RECEIVE_ASSET,
+        "receiveChain": RECEIVE_CHAIN or None,
         "summary": summary,
         "worked": worked,
         "issues": issues,
@@ -2032,8 +2510,8 @@ def main():
         "checkpoints": checkpoints,
         "expectations": expectations,
         "balances": {
-            "initialUnified": f"{total_usdc} USDC" if total_usdc else None,
-            "finalUnified": f"{final_total_usdc} USDC" if final_total_usdc else None,
+            "initialUnified": f"{total_usdc} {ASSET_SYMBOL}" if total_usdc else None,
+            "finalUnified": f"{final_total_usdc} {ASSET_SYMBOL}" if final_total_usdc else None,
             "breakdown": breakdown_rows,
         },
         "walletInteraction": {
