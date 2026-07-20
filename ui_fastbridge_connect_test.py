@@ -821,6 +821,22 @@ def find_send_amount_input(page: Page):
     return candidates.first if candidates.count() > 0 else None
 
 
+def set_send_amount(page: Page, amount: str = BRIDGE_AMOUNT) -> None:
+    amount_input = find_send_amount_input(page)
+    if amount_input is None:
+        raise RuntimeError("Send amount input was not found after selecting assets.")
+    amount_input.click()
+    try:
+        amount_input.fill("")
+    except Exception:
+        page.keyboard.press("Meta+A")
+        page.keyboard.press("Backspace")
+    # Keystroke entry reliably drives the v2 per-token onChange path.
+    page.keyboard.type(amount, delay=40)
+    amount_input.press("Tab")
+    page.wait_for_timeout(500)
+
+
 def select_send_asset(
     page: Page,
     symbol: str = ASSET_SYMBOL,
@@ -838,10 +854,15 @@ def select_send_asset(
         )
     except PlaywrightTimeoutError:
         pass
-    if symbol.upper() == "ETH" or source_chain:
+    if symbol.upper() == "ETH":
         native = find_button_matching(page, r"^Native$")
         if button_is_ready(native):
             native.click()
+            page.wait_for_timeout(600)
+    elif symbol.upper() in {"USDC", "USDT", "DAI", "GHO"}:
+        stables = find_button_matching(page, r"^Stables$")
+        if button_is_ready(stables):
+            stables.click()
             page.wait_for_timeout(600)
     picker = wait_and_capture(page, f"{DESTINATION_SLUG}-asset-picker", 300)
 
@@ -888,9 +909,23 @@ def select_receive_asset(
     page: Page,
     symbol: str = RECEIVE_ASSET,
     receive_chain: str = RECEIVE_CHAIN,
+    force: bool = False,
 ) -> Optional[Dict[str, Any]]:
     if not symbol:
         return None
+
+    # Skip when receive side already shows the configured asset/chain.
+    body_before = page.locator("body").inner_text()
+    if (
+        not force
+        and receive_chain
+        and re.search(
+            rf"RECEIVE[\s\S]{{0,240}}?\b{re.escape(symbol)}\b[\s\S]{{0,120}}?(?:\bon\s+{re.escape(receive_chain)}\b|{re.escape(receive_chain)})",
+            body_before,
+            re.I,
+        )
+    ):
+        return wait_and_capture(page, f"{DESTINATION_SLUG}-receive-asset-already-set", 300)
 
     # Click the receive-side token chip (lower on the page than send).
     chip_candidates = []
@@ -908,17 +943,56 @@ def select_receive_asset(
     if not chip_candidates:
         raise RuntimeError("Receive token chip was not found.")
     chip_candidates.sort(key=lambda item: item[0])
-    # Prefer a non-send symbol chip when present; otherwise the lowest chip.
-    preferred = [item for item in chip_candidates if item[1] != symbol.upper()]
-    receive_chip = (preferred[-1] if preferred else chip_candidates[-1])[2]
-    receive_chip.click()
-    page.get_by_text("Select token to receive").first.wait_for(state="visible", timeout=10000)
+    # Prefer the lowest chip matching the receive symbol; else the overall lowest chip
+    # (typically the receive-side token control under the Send amount).
+    matching = [item for item in chip_candidates if item[1] == symbol.upper()]
+    ordered_attempts = matching[::-1] + [item for item in reversed(chip_candidates) if item not in matching]
+
+    picker_visible = False
+    last_error = None
+    for _, _, chip in ordered_attempts[:4]:
+        try:
+            chip.click(force=True)
+            page.wait_for_timeout(400)
+            page.get_by_text(re.compile(r"Select token to receive|Select token", re.I)).first.wait_for(
+                state="visible",
+                timeout=8000,
+            )
+            picker_visible = True
+            break
+        except Exception as exc:
+            last_error = exc
+            # Dismiss accidental send picker / overlays before retrying.
+            try:
+                close = find_button_matching(page, r"^(Close|Cancel|✕|×)$")
+                if button_is_ready(close):
+                    close.click()
+                    page.wait_for_timeout(300)
+            except Exception:
+                pass
+            try:
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(300)
+            except Exception:
+                pass
+    if not picker_visible:
+        wait_and_capture(page, f"{DESTINATION_SLUG}-receive-picker-miss", 200)
+        raise RuntimeError(
+            f"Receive token picker did not open for {symbol}"
+            + (f" on {receive_chain}" if receive_chain else "")
+            + (f" ({last_error})" if last_error else "")
+        )
     page.wait_for_timeout(500)
 
-    if symbol.upper() == "ETH" or receive_chain:
+    if symbol.upper() == "ETH":
         native = find_button_matching(page, r"^Native$")
         if button_is_ready(native):
             native.click()
+            page.wait_for_timeout(600)
+    elif symbol.upper() in {"USDC", "USDT", "DAI", "GHO"}:
+        stables = find_button_matching(page, r"^Stables$")
+        if button_is_ready(stables):
+            stables.click()
             page.wait_for_timeout(600)
     search = page.locator("input[placeholder*='Search']")
     if search.count() > 0 and search.first.is_visible():
@@ -948,8 +1022,20 @@ def select_receive_asset(
     target.click(force=True)
     page.wait_for_timeout(1200)
     body_text = page.locator("body").inner_text()
-    if not re.search(rf"RECEIVE\s*\n\s*{re.escape(symbol)}\b", body_text, re.I):
+    # Exact Out inserts helper copy between RECEIVE and the token chip (e.g. "You can swap up to…").
+    if not re.search(rf"RECEIVE[\s\S]{{0,240}}?\b{re.escape(symbol)}\b", body_text, re.I):
         raise RuntimeError(f"Receive asset did not switch to {symbol} after selection.")
+    if receive_chain:
+        on_chain_label = bool(re.search(rf"\bon\s+{re.escape(receive_chain)}\b", body_text, re.I))
+        chain_l = receive_chain.lower()
+        slug_l = DESTINATION_SLUG.lower()
+        dest_matches = (
+            (chain_l == "base" and slug_l == "base")
+            or (chain_l in {"optimism", "op", "op-mainnet"} and slug_l in {"optimism", "op-mainnet"})
+            or chain_l.replace(" ", "-") == slug_l
+        )
+        if not on_chain_label and not dest_matches:
+            raise RuntimeError(f"Receive chain {receive_chain} was not visible after selection.")
     return wait_and_capture(page, f"{DESTINATION_SLUG}-receive-asset", 300)
 
 
@@ -960,10 +1046,12 @@ def wait_for_quote_ready(page: Page, timeout_ms: int = QUOTE_READY_TIMEOUT_MS) -
         page.wait_for_function(
             """(token) => {
               const text = document.body.innerText || "";
-              const buttons = Array.from(document.querySelectorAll("button"));
-              const enabledLabel = (wanted) => buttons.some((button) => {
-                const label = (button.innerText || button.textContent || "").trim();
-                return label === wanted && !button.disabled && button.getAttribute("aria-disabled") !== "true";
+              const controls = Array.from(document.querySelectorAll("button, [role='button']"));
+              const enabledLabel = (wanted) => controls.some((button) => {
+                const label = (button.innerText || button.textContent || "").trim().split('\\n')[0].trim();
+                const ariaDisabled = (button.getAttribute("aria-disabled") || "").toLowerCase();
+                const disabled = button.disabled || ariaDisabled === "true";
+                return label === wanted && !disabled;
               });
               const amountMatches = text.match(new RegExp(`[0-9]+(?:\\\\.[0-9]+)?\\\\s+${token}`, 'g')) || [];
               const legacyAcceptReady = enabledLabel("Accept")
@@ -977,7 +1065,13 @@ def wait_for_quote_ready(page: Page, timeout_ms: int = QUOTE_READY_TIMEOUT_MS) -
                 && (text.includes("You Receive") || text.includes("You receive"))
                 && (text.includes("Total Fees") || text.includes("Total fees"))
                 && amountMatches.length >= 2;
-              return legacyAcceptReady || reviewCtaReady || confirmReady;
+              // V2 Send view can show a populated receive amount before the CTA flips enabled.
+              const receivePreviewReady = /RECEIVE[\\s\\S]{0,120}?[1-9][0-9]*\\.[0-9]+/.test(text)
+                && controls.some((button) => {
+                  const label = (button.innerText || button.textContent || "").trim().split('\\n')[0].trim();
+                  return label === "Review swap";
+                });
+              return legacyAcceptReady || reviewCtaReady || confirmReady || receivePreviewReady;
             }""",
             arg=token,
             timeout=timeout_ms,
@@ -990,6 +1084,45 @@ def wait_for_quote_ready(page: Page, timeout_ms: int = QUOTE_READY_TIMEOUT_MS) -
             "timeoutMs": timeout_ms,
             "reason": "Quote did not reach a Review swap / Swap now ready state before timeout.",
         }
+
+
+def describe_review_cta(page: Page) -> str:
+    details = []
+    locator = page.get_by_role("button", name=re.compile(r"Review swap", re.I))
+    for index in range(min(locator.count(), 5)):
+        button = locator.nth(index)
+        try:
+            details.append(
+                {
+                    "text": (button.inner_text() or "").strip()[:80],
+                    "visible": button.is_visible(),
+                    "enabled": button.is_enabled(),
+                    "disabledAttr": button.get_attribute("disabled"),
+                    "ariaDisabled": button.get_attribute("aria-disabled"),
+                    "className": (button.get_attribute("class") or "")[:120],
+                }
+            )
+        except Exception as exc:
+            details.append({"error": str(exc)})
+    return json.dumps(details)
+
+
+def click_review_swap(page: Page) -> bool:
+    review_button = find_button_matching(page, r"^Review swap$")
+    if not review_button:
+        candidates = page.locator("button, [role='button']").filter(
+            has_text=re.compile(r"^Review swap$", re.I)
+        )
+        review_button = candidates.first if candidates.count() else None
+    if not review_button:
+        return False
+    if click_ready_button(page, review_button, timeout_ms=8000):
+        return True
+    try:
+        review_button.click(force=True, timeout=3000)
+        return True
+    except Exception:
+        return False
 
 
 def wait_and_capture(page: Page, label: str, delay_ms: int = 1500) -> Dict[str, Any]:
@@ -1855,23 +1988,37 @@ def main():
         context.add_init_script(INIT_SCRIPT.replace("%ADDRESS%", account_address).replace("%CHAIN_ID%", hex(8453)))
         page = context.new_page()
 
-        page.on("console", lambda msg: console_errors.append({"type": msg.type, "text": msg.text}) if msg.type == "error" else None)
-        page.on("pageerror", lambda error: page_errors.append(str(error)))
-
         def on_request(request):
-            if any(host in request.url for host in ["avail.so"]):
+            if any(host in request.url for host in ["avail.so", "web3modal.org", "reown.com", "walletconnect.com"]):
                 network_events.append({"type": "request", "method": request.method, "url": request.url})
 
         def on_response(response):
-            if any(host in response.url for host in ["avail.so"]):
+            if any(host in response.url for host in ["avail.so", "web3modal.org", "reown.com", "walletconnect.com"]):
                 event = {"type": "response", "status": response.status, "url": response.url}
                 try:
                     if "application/json" in (response.headers.get("content-type") or ""):
                         event["json"] = response.json()
+                    elif response.status >= 400:
+                        event["bodyText"] = (response.text() or "")[:300]
                 except Exception:
                     pass
                 network_events.append(event)
 
+        def on_console(msg):
+            if msg.type != "error":
+                return
+            entry = {"type": msg.type, "text": msg.text}
+            try:
+                loc = msg.location
+                if loc:
+                    entry["url"] = loc.get("url")
+                    entry["line"] = loc.get("lineNumber")
+            except Exception:
+                pass
+            console_errors.append(entry)
+
+        page.on("console", on_console)
+        page.on("pageerror", lambda error: page_errors.append(str(error)))
         page.on("request", on_request)
         page.on("response", on_response)
 
@@ -1939,27 +2086,27 @@ def main():
                 artifacts.append({"label": "Receive asset picker", "path": receive_picker["screenshot"]})
                 step_log.append(receive_picker)
 
-        amount_input = find_send_amount_input(page)
-        if amount_input is None:
-            raise RuntimeError("Send amount input was not found after selecting assets.")
         quote_start = time.monotonic()
-        amount_input.fill(BRIDGE_AMOUNT)
+        set_send_amount(page, BRIDGE_AMOUNT)
 
         # EXP-T05: change amount and verify input remains responsive (UI not frozen)
         amount_change_ms: Optional[int] = None
         ui_responsive_after_change = False
+        amount_input = find_send_amount_input(page)
         try:
             amount_value = float(BRIDGE_AMOUNT)
             delta = 0.00001 if amount_value < 0.01 else 0.01
             alternate_amount = format(amount_value + delta, "f").rstrip("0").rstrip(".")
             change_start = time.monotonic()
-            amount_input.fill(alternate_amount)
+            set_send_amount(page, alternate_amount)
+            amount_input = find_send_amount_input(page)
             ui_responsive_after_change = (
-                not amount_input.is_disabled()
+                amount_input is not None
+                and not amount_input.is_disabled()
                 and amount_input.input_value() == alternate_amount
             )
             amount_change_ms = int((time.monotonic() - change_start) * 1000)
-            amount_input.fill(BRIDGE_AMOUNT)
+            set_send_amount(page, BRIDGE_AMOUNT)
         except Exception:
             pass
 
@@ -1971,33 +2118,32 @@ def main():
             delta = 0.00001 if amount_value < 0.01 else 0.01
             alternate_amount = format(amount_value + delta, "f").rstrip("0").rstrip(".")
             page.wait_for_timeout(400)  # let quote fetch begin but not complete
-            amount_input.fill(alternate_amount)
-            mid_fetch_input_enabled = not amount_input.is_disabled()
+            set_send_amount(page, alternate_amount)
+            amount_input = find_send_amount_input(page)
+            mid_fetch_input_enabled = amount_input is not None and not amount_input.is_disabled()
             # re-fetch started if the UI shows a loading indicator or the quote text resets
             page_text_mid = page.locator("body").inner_text()
             mid_fetch_refetch_started = (
                 "Fetching" in page_text_mid
                 or "fetching" in page_text_mid
-                or amount_input.input_value() == alternate_amount
+                or (amount_input is not None and amount_input.input_value() == alternate_amount)
             )
-            amount_input.fill(BRIDGE_AMOUNT)
+            set_send_amount(page, BRIDGE_AMOUNT)
         except Exception:
             pass
 
         quote_wait = wait_for_quote_ready(page)
-        quote_waits.append({"stage": "after-amount", **quote_wait})
+        quote_waits.append({"stage": "after-amount", **quote_wait, "reviewCta": describe_review_cta(page)})
         after_amount = wait_and_capture(page, f"{DESTINATION_SLUG}-after-amount", 300)
         quote_visible_ms = int((time.monotonic() - quote_start) * 1000)
         artifacts.append({"label": "After amount input", "path": after_amount["screenshot"]})
         step_log.append(after_amount)
 
         # V2: Review swap opens confirm sheet; legacy: Bridge/Accept path
-        review_button = find_button_matching(page, r"^Review swap$")
         accept_button = find_button(page, "Accept")
-        if button_is_ready(review_button):
-            review_button.click()
+        if click_review_swap(page):
             review_quote_wait = wait_for_quote_ready(page, timeout_ms=10000)
-            quote_waits.append({"stage": "review", **review_quote_wait})
+            quote_waits.append({"stage": "review", **review_quote_wait, "reviewCta": describe_review_cta(page)})
             quote_visible_ms = int((time.monotonic() - quote_start) * 1000)
             review = wait_and_capture(page, f"{DESTINATION_SLUG}-review", 300)
             artifacts.append({"label": "Review state", "path": review["screenshot"]})
@@ -2174,20 +2320,41 @@ def main():
     if IS_EXP_U05_RUN and bridge_successful:
         worked.append("EXP-U05 completed: 0.0001 ETH bridged from Base toward Optimism.")
 
-    if any("Failed to load resource: the server responded with a status of 400" in item["text"] for item in console_errors):
+    web3modal_400 = [
+        event
+        for event in network_events
+        if event.get("status") == 400 and "api.web3modal.org/getWallets" in (event.get("url") or "")
+    ]
+    console_400 = any(
+        "Failed to load resource: the server responded with a status of 400" in item["text"]
+        for item in console_errors
+    )
+    if console_400 or web3modal_400:
+        failing_url = (web3modal_400[0].get("url") if web3modal_400 else None) or next(
+            (item.get("url") for item in console_errors if item.get("url") and "400" in item.get("text", "")),
+            "https://api.web3modal.org/getWallets?...&entries=0",
+        )
         append_issue(
             issues,
             "Background 400 Error Visible In Console",
             "medium",
-            "The app still emits a recurring 400 resource error during normal usage. It did not block this route, but it remains noisy and could hide other issues.",
+            (
+                "Reown/WalletConnect AppKit calls getWallets with entries=0 during startup and receives HTTP 400 "
+                "Bad Request from api.web3modal.org. This does not block swap/bridge execution when a wallet is "
+                "already injected, but it pollutes console/pageerror noise."
+            ),
             [
-                "Open FastBridge on any supported route.",
-                "Open browser devtools console.",
-                "Observe the recurring 400 resource error during startup.",
+                "Open FastBridge on any supported route with AppKit/Web3Modal enabled.",
+                "Open browser devtools Network/Console during first paint.",
+                f"Observe GET {failing_url} returning 400 Bad Request.",
             ],
             issue_id="FB-P2-001",
             evidence=initial["screenshot"],
-            root_cause="One or more startup requests are failing with a 400 without a user-facing surface.",
+            root_cause=(
+                "AppKit wallet catalog prefetch uses invalid pagination (entries=0). "
+                "api.web3modal.org rejects it with 400; Chromium surfaces a console error and the SDK emits "
+                "pageerror 'HTTP status code: 400'."
+            ),
         )
 
     if any("401" in item["text"] for item in console_errors):
