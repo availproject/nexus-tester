@@ -76,6 +76,11 @@ def prune_old_runs(runs_dir: Path, keep: int) -> None:
 
 SCENARIO_ID = os.environ.get("FASTBRIDGE_SCENARIO", "").strip().upper()
 SCENARIO_DEFAULTS = {
+    "EXP-U04": {
+        "dest": "base",
+        "amount": "0.1",
+        "asset": "USDC",
+    },
     "EXP-U05": {
         "dest": "optimism",
         "amount": "0.0001",
@@ -83,6 +88,33 @@ SCENARIO_DEFAULTS = {
         "source_chain": "Base",
         "receive_asset": "ETH",
         "receive_chain": "Optimism",
+    },
+    "EXP-U06": {
+        "dest": "optimism",
+        "amount": "0.1",
+        "asset": "USDC",
+        "source_chain": "Base",
+        "receive_asset": "USDC",
+        "receive_chain": "Optimism",
+        "exact_mode": "in",
+    },
+    "EXP-U07": {
+        "dest": "base",
+        "amount": "0.1",
+        "asset": "USDC",
+        "source_chain": "",
+        "receive_asset": "USDC",
+        "receive_chain": "Base",
+        "exact_mode": "out",
+    },
+    "EXP-U08": {
+        "dest": "base",
+        "amount": "0.0001",
+        "asset": "ETH",
+        "source_chain": "",
+        "receive_asset": "ETH",
+        "receive_chain": "Base",
+        "exact_mode": "out",
     },
 }
 _scenario = SCENARIO_DEFAULTS.get(SCENARIO_ID, {})
@@ -96,16 +128,81 @@ RECEIVE_ASSET = (
     or ASSET_SYMBOL
 )
 RECEIVE_CHAIN = os.environ.get("FASTBRIDGE_RECEIVE_CHAIN", _scenario.get("receive_chain", "")).strip()
+_exact_mode_raw = os.environ.get("FASTBRIDGE_EXACT_MODE", _scenario.get("exact_mode", "in")).strip().lower()
+EXACT_MODE = "out" if _exact_mode_raw in {"out", "exact_out", "exact-out"} else "in"
+if SCENARIO_ID == "EXP-U07":
+    # Scenario wins over leftover FASTBRIDGE_* env overrides from other runs.
+    EXACT_MODE = "out"
+    DESTINATION_SLUG = "base"
+    BASE_URL = f"https://fastbridge.availproject.org/{DESTINATION_SLUG}/"
+    BRIDGE_AMOUNT = os.environ.get("FASTBRIDGE_BRIDGE_AMOUNT", _scenario.get("amount", "0.1")).strip() or "0.1"
+    ASSET_SYMBOL = "USDC"
+    RECEIVE_ASSET = "USDC"
+    RECEIVE_CHAIN = "Base"
+    SOURCE_CHAIN = ""
+elif SCENARIO_ID == "EXP-U08":
+    EXACT_MODE = "out"
+    DESTINATION_SLUG = "base"
+    BASE_URL = f"https://fastbridge.availproject.org/{DESTINATION_SLUG}/"
+    BRIDGE_AMOUNT = os.environ.get("FASTBRIDGE_BRIDGE_AMOUNT", _scenario.get("amount", "0.0001")).strip() or "0.0001"
+    ASSET_SYMBOL = "ETH"
+    RECEIVE_ASSET = "ETH"
+    RECEIVE_CHAIN = "Base"
+    SOURCE_CHAIN = ""
+elif SCENARIO_ID == "EXP-U06":
+    EXACT_MODE = "in"
+    DESTINATION_SLUG = "optimism"
+    BASE_URL = f"https://fastbridge.availproject.org/{DESTINATION_SLUG}/"
+    BRIDGE_AMOUNT = os.environ.get("FASTBRIDGE_BRIDGE_AMOUNT", _scenario.get("amount", "0.1")).strip() or "0.1"
+    ASSET_SYMBOL = "USDC"
+    RECEIVE_ASSET = "USDC"
+    RECEIVE_CHAIN = "Optimism"
+    SOURCE_CHAIN = "Base"
 STOP_BEFORE_EXECUTION = os.environ.get("FASTBRIDGE_STOP_BEFORE_EXECUTION", "").strip().lower() in {"1", "true", "yes", "quote", "review"}
 QUOTE_READY_TIMEOUT_MS = int(os.environ.get("FASTBRIDGE_QUOTE_READY_TIMEOUT_MS", "15000"))
 NAVIGATION_TIMEOUT_MS = int(os.environ.get("FASTBRIDGE_NAVIGATION_TIMEOUT_MS", "45000"))
 POST_LOAD_NETWORK_IDLE_TIMEOUT_MS = int(os.environ.get("FASTBRIDGE_POST_LOAD_NETWORK_IDLE_TIMEOUT_MS", "10000"))
+IS_EXP_U04_RUN = SCENARIO_ID == "EXP-U04"
+IS_EXP_U08_RUN = SCENARIO_ID == "EXP-U08" or (
+    SCENARIO_ID not in {"EXP-U04", "EXP-U05", "EXP-U06", "EXP-U07"}
+    and EXACT_MODE == "out"
+    and ASSET_SYMBOL == "ETH"
+    and DESTINATION_SLUG == "base"
+    and RECEIVE_ASSET == "ETH"
+    and RECEIVE_CHAIN.lower() == "base"
+)
+IS_EXP_U07_RUN = SCENARIO_ID == "EXP-U07" or (
+    SCENARIO_ID not in {"EXP-U04", "EXP-U05", "EXP-U06", "EXP-U08"}
+    and not IS_EXP_U08_RUN
+    and EXACT_MODE == "out"
+    and ASSET_SYMBOL == "USDC"
+    and DESTINATION_SLUG == "base"
+    and RECEIVE_ASSET == "USDC"
+    and RECEIVE_CHAIN.lower() == "base"
+)
 IS_EXP_U05_RUN = SCENARIO_ID == "EXP-U05" or (
-    ASSET_SYMBOL == "ETH"
+    SCENARIO_ID not in {"EXP-U04", "EXP-U07", "EXP-U08"}
+    and not IS_EXP_U08_RUN
+    and EXACT_MODE == "in"
+    and ASSET_SYMBOL == "ETH"
     and SOURCE_CHAIN.lower() == "base"
     and DESTINATION_SLUG in {"optimism", "op-mainnet"}
     and RECEIVE_ASSET == "ETH"
 )
+IS_EXP_U06_RUN = SCENARIO_ID == "EXP-U06" or (
+    SCENARIO_ID not in {"EXP-U04", "EXP-U05", "EXP-U07", "EXP-U08"}
+    and not IS_EXP_U07_RUN
+    and not IS_EXP_U08_RUN
+    and EXACT_MODE == "in"
+    and ASSET_SYMBOL == "USDC"
+    and SOURCE_CHAIN.lower() == "base"
+    and DESTINATION_SLUG in {"optimism", "op-mainnet"}
+    and RECEIVE_ASSET == "USDC"
+    and RECEIVE_CHAIN.lower() == "optimism"
+)
+# EXP-U04 is a UI-only scenario: stop after connected Send / Exact In checks.
+if IS_EXP_U04_RUN:
+    STOP_BEFORE_EXECUTION = True
 
 CHAIN_CONFIG = {
     1: {"name": "Ethereum", "rpc": "https://1rpc.io/eth"},
@@ -193,15 +290,33 @@ EXPECTATION_CATALOG = [
     },
     {
         "id": "EXP-U04",
-        "name": "Send view - Add assets",
+        "name": "Exact In --> Send view --> Add assets",
         "category": "UI",
-        "description": "Fastbridge page shows up after wallet is connected with 'Swap and Bridge' label, having 'Send' and 'Receive' view",
+        "description": "Fastbridge page shows up after wallet is connected with 'Swap and Bridge' label, having 'Send' and 'Receive' view; 'Exact In' tab is by default selected",
     },
     {
         "id": "EXP-U05",
         "name": "Send view - Add assets - ETH",
         "category": "UI",
         "description": "Fastbridge page shows up after wallet is connected with 'Swap and Bridge' label, having 'Send' and 'Receive' view; Execute bridge for 0.0001 ETH from 'Base' to 'Optimism'",
+    },
+    {
+        "id": "EXP-U06",
+        "name": "Send view - Add assets - USDC",
+        "category": "UI",
+        "description": "Fastbridge page shows up after wallet is connected with 'Swap and Bridge' label, having 'Send' and 'Receive' view; Execute bridge for 0.1 USDC from 'Base' to 'Optimism'",
+    },
+    {
+        "id": "EXP-U07",
+        "name": "Send view - Exact Out - USDC",
+        "category": "UI",
+        "description": "Fastbridge page shows up after wallet is connected with 'Swap and Bridge' label, having 'Send' and 'Receive' view; Click on 'Exact Out'; Select Base network and USDC as asset in 'Receive' view and enter value as '0.1'",
+    },
+    {
+        "id": "EXP-U08",
+        "name": "Send view - Exact Out - ETH",
+        "category": "UI",
+        "description": "Fastbridge page shows up after wallet is connected with 'Swap and Bridge' label, having 'Send' and 'Receive' view; Click on 'Exact Out'; Select Base network and ETH as asset in 'Receive' view and enter value as '0.0001'",
     },
 ]
 
@@ -407,8 +522,24 @@ def extract_quote_details(
     spend_index = find_label(*spend_labels)
     receive_index = find_label(*receive_labels)
     fees_index = find_label(*fee_labels)
-    amount_spent = first_amount_after(spend_labels, receive_labels + fee_labels, amount_re=spend_amount_re)
+    # Exact Out may auto-select a different spend token than the receive asset
+    # (e.g. receive 0.1 USDC funded by USDT on Polygon). Prefer real token units
+    # over the intermediate "X.XX USD" fiat line.
+    any_token_amount_re = r"[0-9]+(?:\.[0-9]+)?\s+(?!USD\b)[A-Za-z][A-Za-z0-9.]*"
+    amount_spent = first_amount_after(
+        spend_labels,
+        receive_labels + fee_labels,
+        amount_re=spend_amount_re,
+    )
+    if amount_spent is None:
+        amount_spent = first_amount_after(
+            spend_labels,
+            receive_labels + fee_labels,
+            amount_re=any_token_amount_re,
+        )
     amount_received = first_amount_after(receive_labels, fee_labels, amount_re=recv_amount_re)
+    if amount_received is None:
+        amount_received = first_amount_after(receive_labels, fee_labels, amount_re=any_token_amount_re)
     total_fees = first_amount_after(
         fee_labels,
         ["Price Impact", "Swap Impact", "Max. Slippage"],
@@ -806,6 +937,125 @@ def click_ready_button(page: Page, button: Any, timeout_ms: int = 15000) -> bool
         return False
 
 
+def _exact_mode_tab(page: Page, mode: str):
+    pattern = r"Exact\s*Out" if mode == "out" else r"Exact\s*In"
+    return page.locator("button, [role='tab'], [data-state], [aria-selected]").filter(
+        has_text=re.compile(pattern, re.I)
+    )
+
+
+def _tab_looks_selected(el) -> bool:
+    aria_selected = (el.get_attribute("aria-selected") or "").lower()
+    data_state = (el.get_attribute("data-state") or "").lower()
+    aria_pressed = (el.get_attribute("aria-pressed") or "").lower()
+    class_name = (el.get_attribute("class") or "").lower()
+    if aria_selected == "true" or aria_pressed == "true" or data_state in {"active", "on", "checked"}:
+        return True
+    return any(token in class_name for token in ("active", "selected", "bg-primary"))
+
+
+def is_exact_mode_tab_selected(page: Page, mode: str) -> bool:
+    candidates = _exact_mode_tab(page, mode)
+    for index in range(candidates.count()):
+        el = candidates.nth(index)
+        try:
+            if el.is_visible() and _tab_looks_selected(el):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def is_exact_in_tab_selected(page: Page) -> bool:
+    if is_exact_mode_tab_selected(page, "in"):
+        return True
+    # Fallback only when Exact Out is clearly not selected.
+    if is_exact_mode_tab_selected(page, "out"):
+        return False
+    try:
+        body = page.locator("body").inner_text()
+        if not re.search(r"Exact\s*In", body, re.I):
+            return False
+        if not re.search(r"Set send amount", body, re.I):
+            return False
+        send_input = find_send_amount_input(page)
+        if send_input is None:
+            return False
+        return send_input.is_editable() and send_input.is_enabled()
+    except Exception:
+        return False
+
+
+def is_exact_out_tab_selected(page: Page) -> bool:
+    return is_exact_mode_tab_selected(page, "out")
+
+
+def select_exact_mode(page: Page, mode: str = "out") -> bool:
+    """Select Exact In / Exact Out. Returns True when the target tab is selected."""
+    mode = "out" if mode == "out" else "in"
+    if is_exact_mode_tab_selected(page, mode):
+        return True
+
+    # WalletConnect / AppKit overlays can intercept Playwright clicks.
+    for _ in range(3):
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(200)
+        except Exception:
+            break
+
+    candidates = _exact_mode_tab(page, mode)
+    if candidates.count() == 0:
+        return False
+
+    target = candidates.first
+    try:
+        target.click(timeout=3000)
+    except Exception:
+        try:
+            target.click(force=True, timeout=3000)
+        except Exception:
+            clicked = page.evaluate(
+                """(mode) => {
+                  const re = mode === 'out' ? /Exact\\s*Out/i : /Exact\\s*In/i;
+                  const tabs = [...document.querySelectorAll("button, [role='tab']")];
+                  const el = tabs.find((t) => re.test(t.textContent || ''));
+                  if (!el) return false;
+                  el.click();
+                  return true;
+                }""",
+                mode,
+            )
+            if not clicked:
+                return False
+
+    page.wait_for_timeout(800)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if is_exact_mode_tab_selected(page, mode):
+            return True
+        page.wait_for_timeout(200)
+    return is_exact_mode_tab_selected(page, mode)
+
+
+# FastBridge disables Review swap unless a source token's balanceInFiat is >= $1
+# (see client `l2 = balanceInFiat >= 1` gate in the SwapController bundle).
+MIN_SOURCE_FIAT_USD = float(os.environ.get("FASTBRIDGE_MIN_SOURCE_FIAT_USD", "1"))
+
+
+def parse_fiat_usd(text: str) -> Optional[float]:
+    if not text:
+        return None
+    match = re.search(r"≈\s*\$?\s*([0-9]+(?:\.[0-9]+)?)|\$\s*([0-9]+(?:\.[0-9]+)?)", text)
+    if not match:
+        return None
+    raw = match.group(1) or match.group(2)
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
 def find_send_amount_input(page: Page):
     legacy = page.locator("input[placeholder='Enter Amount']")
     if legacy.count() > 0 and legacy.first.is_visible():
@@ -900,8 +1150,15 @@ def select_send_asset(
             + (f" on {source_chain}" if source_chain else " (unified)")
             + "."
         )
+    selected_text = target.inner_text()
+    selected_fiat_usd = parse_fiat_usd(selected_text)
     target.click()
     page.wait_for_timeout(1200)
+    picker["selectedAssetText"] = selected_text
+    picker["selectedFiatUsd"] = selected_fiat_usd
+    picker["belowMinSourceFiat"] = (
+        selected_fiat_usd is not None and selected_fiat_usd < MIN_SOURCE_FIAT_USD
+    )
     return picker
 
 
@@ -2042,196 +2299,291 @@ def main():
         artifacts.append({"label": "Initial connected state", "path": initial["screenshot"]})
         step_log.append(initial)
 
-        # EXP-U04: after wallet connect, Send view should show Swap and Bridge with Send/Receive
+        # EXP-U04: after wallet connect, Send view should show Swap and Bridge with
+        # Send/Receive and the Exact In tab selected by default
         initial_text_lower = initial["text"].lower()
         has_swap_and_bridge_label = "swap and bridge" in initial_text_lower
         has_send_view = bool(re.search(r"\bsend\b", initial["text"], re.IGNORECASE))
         has_receive_view = bool(re.search(r"\breceive\b", initial["text"], re.IGNORECASE))
         send_view_ready = has_swap_and_bridge_label and has_send_view and has_receive_view
+        exact_in_selected = is_exact_in_tab_selected(page)
+        exact_out_selected = is_exact_out_tab_selected(page)
+        exp_u04_ready = send_view_ready and exact_in_selected
 
-        if "Initializing..." in initial["text"]:
-            append_issue(
-                issues,
-                "Initialization Stuck",
-                "high",
-                "The bridge remained in an initializing state instead of loading balances and actions.",
-                [
-                    f"Open FastBridge on the {destination_name} route with a connected wallet.",
-                    "Wait for the app to initialize.",
-                    "Observe whether the CTA remains on Initializing... instead of loading balances.",
-                ],
-                issue_id="FB-P1-001",
-                evidence=initial["screenshot"],
-                root_cause="Initialization did not progress from startup state to quote-ready UI.",
-            )
-
-        if page.get_by_text("View Balance Breakdown").is_visible():
-            page.get_by_text("View Balance Breakdown").click()
-            breakdown = wait_and_capture(page, f"{DESTINATION_SLUG}-breakdown", 1500)
-            artifacts.append({"label": "Balance breakdown", "path": breakdown["screenshot"]})
-            step_log.append(breakdown)
-        else:
-            breakdown = {"text": ""}
-
-        # V2 Send view: open Assets picker, capture balances, select configured send asset
-        asset_picker = select_send_asset(page, symbol=ASSET_SYMBOL, source_chain=SOURCE_CHAIN)
-        artifacts.append({"label": "Send asset picker", "path": asset_picker["screenshot"]})
-        step_log.append(asset_picker)
-        if not breakdown.get("text"):
-            breakdown = asset_picker
-
-        if RECEIVE_CHAIN or RECEIVE_ASSET.upper() != "USDC" or ASSET_SYMBOL.upper() != "USDC":
-            receive_picker = select_receive_asset(page, symbol=RECEIVE_ASSET, receive_chain=RECEIVE_CHAIN)
-            if receive_picker:
-                artifacts.append({"label": "Receive asset picker", "path": receive_picker["screenshot"]})
-                step_log.append(receive_picker)
-
-        quote_start = time.monotonic()
-        set_send_amount(page, BRIDGE_AMOUNT)
-
-        # EXP-T05: change amount and verify input remains responsive (UI not frozen)
+        # EXP-U04-only run: validate connected Send/Exact In UI, then stop.
         amount_change_ms: Optional[int] = None
         ui_responsive_after_change = False
-        amount_input = find_send_amount_input(page)
-        try:
-            amount_value = float(BRIDGE_AMOUNT)
-            delta = 0.00001 if amount_value < 0.01 else 0.01
-            alternate_amount = format(amount_value + delta, "f").rstrip("0").rstrip(".")
-            change_start = time.monotonic()
-            set_send_amount(page, alternate_amount)
-            amount_input = find_send_amount_input(page)
-            ui_responsive_after_change = (
-                amount_input is not None
-                and not amount_input.is_disabled()
-                and amount_input.input_value() == alternate_amount
-            )
-            amount_change_ms = int((time.monotonic() - change_start) * 1000)
-            set_send_amount(page, BRIDGE_AMOUNT)
-        except Exception:
-            pass
-
-        # EXP-T06: change amount mid-fetch and verify input stays enabled and re-fetch starts
         mid_fetch_input_enabled: Optional[bool] = None
         mid_fetch_refetch_started: Optional[bool] = None
-        try:
-            amount_value = float(BRIDGE_AMOUNT)
-            delta = 0.00001 if amount_value < 0.01 else 0.01
-            alternate_amount = format(amount_value + delta, "f").rstrip("0").rstrip(".")
-            page.wait_for_timeout(400)  # let quote fetch begin but not complete
-            set_send_amount(page, alternate_amount)
-            amount_input = find_send_amount_input(page)
-            mid_fetch_input_enabled = amount_input is not None and not amount_input.is_disabled()
-            # re-fetch started if the UI shows a loading indicator or the quote text resets
-            page_text_mid = page.locator("body").inner_text()
-            mid_fetch_refetch_started = (
-                "Fetching" in page_text_mid
-                or "fetching" in page_text_mid
-                or (amount_input is not None and amount_input.input_value() == alternate_amount)
-            )
-            set_send_amount(page, BRIDGE_AMOUNT)
-        except Exception:
-            pass
-
-        quote_wait = wait_for_quote_ready(page)
-        quote_waits.append({"stage": "after-amount", **quote_wait, "reviewCta": describe_review_cta(page)})
-        after_amount = wait_and_capture(page, f"{DESTINATION_SLUG}-after-amount", 300)
-        quote_visible_ms = int((time.monotonic() - quote_start) * 1000)
-        artifacts.append({"label": "After amount input", "path": after_amount["screenshot"]})
-        step_log.append(after_amount)
-
-        # V2: Review swap opens confirm sheet; legacy: Bridge/Accept path
-        accept_button = find_button(page, "Accept")
-        if click_review_swap(page):
-            review_quote_wait = wait_for_quote_ready(page, timeout_ms=10000)
-            quote_waits.append({"stage": "review", **review_quote_wait, "reviewCta": describe_review_cta(page)})
-            quote_visible_ms = int((time.monotonic() - quote_start) * 1000)
-            review = wait_and_capture(page, f"{DESTINATION_SLUG}-review", 300)
-            artifacts.append({"label": "Review state", "path": review["screenshot"]})
-            step_log.append(review)
-        elif not button_is_ready(accept_button):
-            bridge_button = find_button(page, "Bridge")
-            if button_is_ready(bridge_button):
-                bridge_button.click()
-                review_quote_wait = wait_for_quote_ready(page, timeout_ms=10000)
-                quote_waits.append({"stage": "review", **review_quote_wait})
-                quote_visible_ms = int((time.monotonic() - quote_start) * 1000)
-            review = wait_and_capture(page, f"{DESTINATION_SLUG}-review", 300)
-            artifacts.append({"label": "Review state", "path": review["screenshot"]})
-            step_log.append(review)
-        else:
-            review = {"text": ""}
-
-        if STOP_BEFORE_EXECUTION:
+        source_below_min_fiat = False
+        source_fiat_usd: Optional[float] = None
+        stopped_for_min_fiat = False
+        if IS_EXP_U04_RUN:
+            breakdown = {"text": "", "screenshot": initial["screenshot"]}
+            after_amount = initial
+            review = {"text": "", "screenshot": initial["screenshot"]}
             allowance = {"text": ""}
             post_approve = {"text": ""}
+            final_state = wait_and_capture(page, f"{DESTINATION_SLUG}-final", 300)
+            artifacts.append({"label": "Final UI state", "path": final_state["screenshot"]})
+            step_log.append(final_state)
+            context.close()
+            browser.close()
         else:
-            swap_now_button = find_button_matching(page, r"^Swap now$")
-            accept_button = find_button(page, "Accept")
-            if button_is_ready(swap_now_button) or find_button_matching(page, r"^Swap now$"):
-                accept_attempted = True
-                execution_attempted = click_ready_button(page, find_button_matching(page, r"^Swap now$"), timeout_ms=20000)
-                if execution_attempted:
-                    execution_start = time.monotonic()
-                allowance = wait_and_capture(page, f"{DESTINATION_SLUG}-allowance", 4000)
-                artifacts.append({"label": "Post Swap now state", "path": allowance["screenshot"]})
-                step_log.append(allowance)
-                # V2 progress UI can linger on "Receiving..." after approvals; wait for a terminal state.
-                try:
-                    page.wait_for_function(
-                        """() => {
-                          const text = document.body.innerText || "";
-                          const terminal = [
-                            "Swap Complete",
-                            "Bridge Successful!",
-                            "Swap Successful",
-                            "Transaction Completed",
-                            "Oops! Something went wrong",
-                          ].some((marker) => text.includes(marker));
-                          const stillInFlight = text.includes("Swapping")
-                            || /Receiving [A-Z0-9.]+/i.test(text)
-                            || /Approve [A-Z0-9.]+ in wallet/i.test(text)
-                            || text.includes("Approve Swaps");
-                          return terminal || (!stillInFlight && text.includes("View Explorer"));
-                        }""",
-                        timeout=45000,
-                    )
-                except PlaywrightTimeoutError:
-                    pass
-                post_approve = wait_and_capture(page, f"{DESTINATION_SLUG}-post-approve", 1500)
-                artifacts.append({"label": "Post approval state", "path": post_approve["screenshot"]})
-                step_log.append(post_approve)
-            elif button_is_ready(accept_button):
-                accept_attempted = True
-                accept_button.click()
-                allowance = wait_and_capture(page, f"{DESTINATION_SLUG}-allowance", 4000)
-                artifacts.append({"label": "Allowance modal", "path": allowance["screenshot"]})
-                step_log.append(allowance)
+            if "Initializing..." in initial["text"]:
+                append_issue(
+                    issues,
+                    "Initialization Stuck",
+                    "high",
+                    "The bridge remained in an initializing state instead of loading balances and actions.",
+                    [
+                        f"Open FastBridge on the {destination_name} route with a connected wallet.",
+                        "Wait for the app to initialize.",
+                        "Observe whether the CTA remains on Initializing... instead of loading balances.",
+                    ],
+                    issue_id="FB-P1-001",
+                    evidence=initial["screenshot"],
+                    root_cause="Initialization did not progress from startup state to quote-ready UI.",
+                )
 
-                approve_button = find_button(page, "Approve Selected")
-                if button_is_ready(approve_button):
-                    execution_attempted = True
-                    execution_start = time.monotonic()
-                    approve_button.click()
-                    post_approve = wait_and_capture(page, f"{DESTINATION_SLUG}-post-approve", 12000)
-                    artifacts.append({"label": "Post approval state", "path": post_approve["screenshot"]})
-                    step_log.append(post_approve)
-                else:
-                    post_approve = {"text": ""}
+            if page.get_by_text("View Balance Breakdown").is_visible():
+                page.get_by_text("View Balance Breakdown").click()
+                breakdown = wait_and_capture(page, f"{DESTINATION_SLUG}-breakdown", 1500)
+                artifacts.append({"label": "Balance breakdown", "path": breakdown["screenshot"]})
+                step_log.append(breakdown)
             else:
+                breakdown = {"text": ""}
+
+            # Exact Out scenarios (EXP-U07/U08): focus Receive asset + amount; send sources auto-select.
+            if IS_EXP_U07_RUN or IS_EXP_U08_RUN or EXACT_MODE == "out":
+                exact_out_selected = select_exact_mode(page, "out")
+                exact_mode_shot = wait_and_capture(page, f"{DESTINATION_SLUG}-exact-out", 400)
+                artifacts.append({"label": "Exact Out selected", "path": exact_mode_shot["screenshot"]})
+                step_log.append({**exact_mode_shot, "exactOutSelected": exact_out_selected})
+                if not exact_out_selected:
+                    append_issue(
+                        issues,
+                        "Exact Out Tab Not Selected",
+                        "high",
+                        "The harness could not activate the Exact Out tab before configuring the receive amount.",
+                        [
+                            f"Open FastBridge on the {destination_name} route with a connected wallet.",
+                            "Click the Exact Out tab (Set receive amount).",
+                            f"In Receive, select {RECEIVE_CHAIN or 'Base'} + {RECEIVE_ASSET or ASSET_SYMBOL}, "
+                            f"then enter {BRIDGE_AMOUNT}.",
+                        ],
+                        issue_id="FB-P1-003",
+                        evidence=exact_mode_shot["screenshot"],
+                        root_cause="Exact Out tab click did not flip aria-selected to true.",
+                    )
+                else:
+                    exact_in_selected = False
+
+                receive_picker = select_receive_asset(
+                    page,
+                    symbol=RECEIVE_ASSET or ASSET_SYMBOL,
+                    receive_chain=RECEIVE_CHAIN or "Base",
+                    force=True,
+                )
+                if receive_picker:
+                    artifacts.append(
+                        {
+                            "label": f"Receive asset picker ({RECEIVE_CHAIN or 'Base'} {RECEIVE_ASSET or ASSET_SYMBOL})",
+                            "path": receive_picker["screenshot"],
+                        }
+                    )
+                    step_log.append(receive_picker)
+                    if not breakdown.get("text"):
+                        breakdown = receive_picker
+            else:
+                asset_picker = select_send_asset(page, symbol=ASSET_SYMBOL, source_chain=SOURCE_CHAIN)
+                artifacts.append({"label": "Send asset picker", "path": asset_picker["screenshot"]})
+                step_log.append(asset_picker)
+                if not breakdown.get("text"):
+                    breakdown = asset_picker
+                source_below_min_fiat = bool(asset_picker.get("belowMinSourceFiat"))
+                source_fiat_usd = asset_picker.get("selectedFiatUsd")
+
+                if RECEIVE_CHAIN or RECEIVE_ASSET.upper() != "USDC" or ASSET_SYMBOL.upper() != "USDC":
+                    receive_picker = select_receive_asset(page, symbol=RECEIVE_ASSET, receive_chain=RECEIVE_CHAIN)
+                    if receive_picker:
+                        artifacts.append({"label": "Receive asset picker", "path": receive_picker["screenshot"]})
+                        step_log.append(receive_picker)
+
+            quote_start = time.monotonic()
+            set_send_amount(page, BRIDGE_AMOUNT)
+
+            # EXP-T05: change amount and verify input remains responsive (UI not frozen)
+            amount_input = find_send_amount_input(page)
+            try:
+                amount_value = float(BRIDGE_AMOUNT)
+                delta = 0.00001 if amount_value < 0.01 else 0.01
+                alternate_amount = format(amount_value + delta, "f").rstrip("0").rstrip(".")
+                change_start = time.monotonic()
+                set_send_amount(page, alternate_amount)
+                amount_input = find_send_amount_input(page)
+                ui_responsive_after_change = (
+                    amount_input is not None
+                    and not amount_input.is_disabled()
+                    and amount_input.input_value() == alternate_amount
+                )
+                amount_change_ms = int((time.monotonic() - change_start) * 1000)
+                set_send_amount(page, BRIDGE_AMOUNT)
+            except Exception:
+                pass
+
+            # EXP-T06: change amount mid-fetch and verify input stays enabled and re-fetch starts
+            try:
+                amount_value = float(BRIDGE_AMOUNT)
+                delta = 0.00001 if amount_value < 0.01 else 0.01
+                alternate_amount = format(amount_value + delta, "f").rstrip("0").rstrip(".")
+                page.wait_for_timeout(400)  # let quote fetch begin but not complete
+                set_send_amount(page, alternate_amount)
+                amount_input = find_send_amount_input(page)
+                mid_fetch_input_enabled = amount_input is not None and not amount_input.is_disabled()
+                page_text_mid = page.locator("body").inner_text()
+                mid_fetch_refetch_started = (
+                    "Fetching" in page_text_mid
+                    or "fetching" in page_text_mid
+                    or (amount_input is not None and amount_input.input_value() == alternate_amount)
+                )
+                set_send_amount(page, BRIDGE_AMOUNT)
+            except Exception:
+                pass
+
+            # Prefer waiting for Review swap. If the source is under FastBridge's $1
+            # fiat gate, Review stays disabled and we classify LOW_BALANCE instead of
+            # timing out as an unknown harness failure.
+            quote_wait = wait_for_quote_ready(page)
+            quote_waits.append(
+                {
+                    "stage": "after-amount",
+                    **quote_wait,
+                    "reviewCta": describe_review_cta(page),
+                    "belowMinSourceFiat": source_below_min_fiat,
+                    "selectedFiatUsd": source_fiat_usd,
+                }
+            )
+            after_amount = wait_and_capture(page, f"{DESTINATION_SLUG}-after-amount", 300)
+            quote_visible_ms = int((time.monotonic() - quote_start) * 1000)
+            artifacts.append({"label": "After amount input", "path": after_amount["screenshot"]})
+            step_log.append(after_amount)
+
+            review_ready = bool(quote_wait.get("ready")) and button_is_ready(
+                find_button_matching(page, r"^Review swap$")
+            )
+            if source_below_min_fiat and not review_ready:
+                stopped_for_min_fiat = True
+                quote_waits[-1]["reason"] = (
+                    quote_wait.get("reason")
+                    or (
+                        f"Source {ASSET_SYMBOL}"
+                        + (f" on {SOURCE_CHAIN}" if SOURCE_CHAIN else "")
+                        + f" has balanceInFiat ${source_fiat_usd:.2f}, below the FastBridge "
+                        f"${MIN_SOURCE_FIAT_USD:.0f} minimum required to enable Review swap."
+                    )
+                )
+                review = {"text": after_amount.get("text", "")}
                 allowance = {"text": ""}
                 post_approve = {"text": ""}
+                final_state = wait_and_capture(page, f"{DESTINATION_SLUG}-final", 300)
+                artifacts.append({"label": "Final UI state", "path": final_state["screenshot"]})
+                step_log.append(final_state)
+                context.close()
+                browser.close()
+            else:
+                # V2: Review swap opens confirm sheet; legacy: Bridge/Accept path
+                accept_button = find_button(page, "Accept")
+                if click_review_swap(page):
+                    review_quote_wait = wait_for_quote_ready(page, timeout_ms=10000)
+                    quote_waits.append({"stage": "review", **review_quote_wait, "reviewCta": describe_review_cta(page)})
+                    quote_visible_ms = int((time.monotonic() - quote_start) * 1000)
+                    review = wait_and_capture(page, f"{DESTINATION_SLUG}-review", 300)
+                    artifacts.append({"label": "Review state", "path": review["screenshot"]})
+                    step_log.append(review)
+                elif not button_is_ready(accept_button):
+                    bridge_button = find_button(page, "Bridge")
+                    if button_is_ready(bridge_button):
+                        bridge_button.click()
+                        review_quote_wait = wait_for_quote_ready(page, timeout_ms=10000)
+                        quote_waits.append({"stage": "review", **review_quote_wait})
+                        quote_visible_ms = int((time.monotonic() - quote_start) * 1000)
+                    review = wait_and_capture(page, f"{DESTINATION_SLUG}-review", 300)
+                    artifacts.append({"label": "Review state", "path": review["screenshot"]})
+                    step_log.append(review)
+                else:
+                    review = {"text": ""}
 
-        final_state = wait_and_capture(page, f"{DESTINATION_SLUG}-final", 3000)
-        if execution_start is not None:
-            execution_completion_ms = int((time.monotonic() - execution_start) * 1000)
-        artifacts.append({"label": "Final UI state", "path": final_state["screenshot"]})
-        step_log.append(final_state)
-        explorer_link = page.locator("a", has_text="View Explorer").first
-        if explorer_link.count() > 0:
-            explorer_url = explorer_link.get_attribute("href")
+                if STOP_BEFORE_EXECUTION:
+                    allowance = {"text": ""}
+                    post_approve = {"text": ""}
+                else:
+                    swap_now_button = find_button_matching(page, r"^Swap now$")
+                    accept_button = find_button(page, "Accept")
+                    if button_is_ready(swap_now_button) or find_button_matching(page, r"^Swap now$"):
+                        accept_attempted = True
+                        execution_attempted = click_ready_button(page, find_button_matching(page, r"^Swap now$"), timeout_ms=20000)
+                        if execution_attempted:
+                            execution_start = time.monotonic()
+                        allowance = wait_and_capture(page, f"{DESTINATION_SLUG}-allowance", 4000)
+                        artifacts.append({"label": "Post Swap now state", "path": allowance["screenshot"]})
+                        step_log.append(allowance)
+                        try:
+                            page.wait_for_function(
+                                """() => {
+                                  const text = document.body.innerText || "";
+                                  const terminal = [
+                                    "Swap Complete",
+                                    "Bridge Successful!",
+                                    "Swap Successful",
+                                    "Transaction Completed",
+                                    "Oops! Something went wrong",
+                                  ].some((marker) => text.includes(marker));
+                                  const stillInFlight = text.includes("Swapping")
+                                    || /Receiving [A-Z0-9.]+/i.test(text)
+                                    || /Approve [A-Z0-9.]+ in wallet/i.test(text)
+                                    || text.includes("Approve Swaps");
+                                  return terminal || (!stillInFlight && text.includes("View Explorer"));
+                                }""",
+                                timeout=45000,
+                            )
+                        except PlaywrightTimeoutError:
+                            pass
+                        post_approve = wait_and_capture(page, f"{DESTINATION_SLUG}-post-approve", 1500)
+                        artifacts.append({"label": "Post approval state", "path": post_approve["screenshot"]})
+                        step_log.append(post_approve)
+                    elif button_is_ready(accept_button):
+                        accept_attempted = True
+                        accept_button.click()
+                        allowance = wait_and_capture(page, f"{DESTINATION_SLUG}-allowance", 4000)
+                        artifacts.append({"label": "Allowance modal", "path": allowance["screenshot"]})
+                        step_log.append(allowance)
 
-        context.close()
-        browser.close()
+                        approve_button = find_button(page, "Approve Selected")
+                        if button_is_ready(approve_button):
+                            execution_attempted = True
+                            execution_start = time.monotonic()
+                            approve_button.click()
+                            post_approve = wait_and_capture(page, f"{DESTINATION_SLUG}-post-approve", 12000)
+                            artifacts.append({"label": "Post approval state", "path": post_approve["screenshot"]})
+                            step_log.append(post_approve)
+                        else:
+                            post_approve = {"text": ""}
+                    else:
+                        allowance = {"text": ""}
+                        post_approve = {"text": ""}
+
+                final_state = wait_and_capture(page, f"{DESTINATION_SLUG}-final", 3000)
+                if execution_start is not None:
+                    execution_completion_ms = int((time.monotonic() - execution_start) * 1000)
+                artifacts.append({"label": "Final UI state", "path": final_state["screenshot"]})
+                step_log.append(final_state)
+                explorer_link = page.locator("a", has_text="View Explorer").first
+                if explorer_link.count() > 0:
+                    explorer_url = explorer_link.get_attribute("href")
+
+                context.close()
+                browser.close()
 
     worked = []
     summary = []
@@ -2252,30 +2604,35 @@ def main():
     route_blocked_low_balance = any(
         "No eligible source chains available" in step.get("text", "")
         or "Insufficient" in step.get("text", "")
+        or step.get("belowMinSourceFiat")
         for step in step_log
-    )
+    ) or any(item.get("belowMinSourceFiat") and not item.get("ready") for item in quote_waits) or stopped_for_min_fiat
     initial_quote = extract_best_quote(step_log, symbol=ASSET_SYMBOL, receive_symbol=RECEIVE_ASSET)
     quote_parsed = bool(initial_quote.get("quoteParsed"))
     quote_ready_seen = any(item.get("ready") for item in quote_waits)
     sign_or_tx_attempted = used_gasless_flow or bool(tx_log)
-    harness_outcome = (
-        "COMPLETED"
-        if quote_parsed or bridge_successful or route_blocked_low_balance
-        else "PARSER_ERROR"
-        if quote_ready_seen
-        else "HARNESS_TIMEOUT"
-    )
-    product_outcome = (
-        "PRODUCT_PASS"
-        if bridge_successful
-        else "NOT_ATTEMPTED"
-        if STOP_BEFORE_EXECUTION
-        else "LOW_BALANCE"
-        if route_blocked_low_balance
-        else "PRODUCT_FAIL"
-        if accept_attempted or execution_attempted or sign_or_tx_attempted
-        else "UNKNOWN"
-    )
+    if IS_EXP_U04_RUN:
+        harness_outcome = "COMPLETED" if exp_u04_ready else "FAIL"
+        product_outcome = "PRODUCT_PASS" if exp_u04_ready else "PRODUCT_FAIL"
+    else:
+        harness_outcome = (
+            "COMPLETED"
+            if quote_parsed or bridge_successful or route_blocked_low_balance
+            else "PARSER_ERROR"
+            if quote_ready_seen
+            else "HARNESS_TIMEOUT"
+        )
+        product_outcome = (
+            "PRODUCT_PASS"
+            if bridge_successful
+            else "NOT_ATTEMPTED"
+            if STOP_BEFORE_EXECUTION
+            else "LOW_BALANCE"
+            if route_blocked_low_balance
+            else "PRODUCT_FAIL"
+            if accept_attempted or execution_attempted or sign_or_tx_attempted
+            else "UNKNOWN"
+        )
     completion = extract_completion_details(final_text, symbol=RECEIVE_ASSET or ASSET_SYMBOL)
     breakdown_rows = extract_breakdown_rows(breakdown["text"], symbol=ASSET_SYMBOL)
     total_usdc = (
@@ -2301,6 +2658,12 @@ def main():
         worked.append(f"Send asset picker exposed per-chain {ASSET_SYMBOL} balances for the connected wallet.")
     if send_view_ready:
         worked.append("Connected Send view showed Swap and Bridge with Send and Receive.")
+    if exact_in_selected:
+        worked.append("The Exact In tab was selected by default in the connected Send view.")
+    if exact_out_selected:
+        worked.append("The Exact Out tab was selected before entering the bridge amount.")
+    if IS_EXP_U04_RUN:
+        worked.append("EXP-U04 UI-only scenario stopped after connected Send / Exact In validation.")
     if initial_quote.get("amountReceived"):
         worked.append(
             f"A real {BRIDGE_AMOUNT} {ASSET_SYMBOL} route to {destination_name} was quoted successfully with spend, receive, and fee information."
@@ -2319,6 +2682,47 @@ def main():
         worked.append("This route completed without a direct wallet-broadcast transaction, which is consistent with a gasless permit-plus-relayer flow.")
     if IS_EXP_U05_RUN and bridge_successful:
         worked.append("EXP-U05 completed: 0.0001 ETH bridged from Base toward Optimism.")
+    if IS_EXP_U06_RUN and bridge_successful:
+        worked.append("EXP-U06 completed: 0.1 USDC bridged from Base toward Optimism.")
+    if IS_EXP_U07_RUN and bridge_successful:
+        worked.append("EXP-U07 completed: Exact Out receive 0.1 USDC on Base.")
+    if IS_EXP_U08_RUN and bridge_successful:
+        worked.append("EXP-U08 completed: Exact Out receive 0.0001 ETH on Base.")
+    if stopped_for_min_fiat:
+        worked.append(
+            f"Detected FastBridge source fiat gate: selected "
+            f"{ASSET_SYMBOL}"
+            + (f" on {SOURCE_CHAIN}" if SOURCE_CHAIN else "")
+            + f" is about ${source_fiat_usd:.2f}, below the ${MIN_SOURCE_FIAT_USD:.0f} minimum that enables Review swap."
+            if source_fiat_usd is not None
+            else "Detected FastBridge source fiat gate blocking Review swap."
+        )
+        append_issue(
+            issues,
+            "Source Balance Below FastBridge Fiat Gate",
+            "high",
+            (
+                f"Review swap remains disabled because the selected source token's USD balance "
+                f"(${source_fiat_usd:.2f}) is below FastBridge's ${MIN_SOURCE_FIAT_USD:.0f} minimum "
+                f"source-fiat requirement. A local receive preview can still appear, which previously "
+                f"looked like a harness timeout."
+                if source_fiat_usd is not None
+                else "Review swap remained disabled due to FastBridge's minimum source-fiat gate."
+            ),
+            [
+                f"Open the {destination_name} route with the connected wallet.",
+                f"Select {ASSET_SYMBOL}"
+                + (f" on {SOURCE_CHAIN}" if SOURCE_CHAIN else "")
+                + " in Send assets.",
+                f"Confirm the per-chain balance shows under ${MIN_SOURCE_FIAT_USD:.0f}.",
+                f"Fund at least ${MIN_SOURCE_FIAT_USD:.0f} of {ASSET_SYMBOL}"
+                + (f" on {SOURCE_CHAIN}" if SOURCE_CHAIN else "")
+                + " and retry.",
+            ],
+            issue_id="FB-P1-002",
+            evidence=(step_log[-1]["screenshot"] if step_log else initial["screenshot"]),
+            root_cause="FastBridge client gates Review swap on source balanceInFiat >= $1 per source token.",
+        )
 
     web3modal_400 = [
         event
@@ -2458,13 +2862,28 @@ def main():
         )
 
     summary.append(f"Unified balance aggregation is working for this wallet on the {destination_name} route.")
-    if quote_parsed:
+    if IS_EXP_U04_RUN:
+        summary.append(
+            "EXP-U04 UI-only run validated the connected Send view with Exact In selected, and skipped quote/execution steps by design."
+            if exp_u04_ready
+            else "EXP-U04 UI-only run did not observe the expected connected Send / Exact In state."
+        )
+    elif quote_parsed:
         summary.append(f"The quote path for sending {BRIDGE_AMOUNT} {ASSET_SYMBOL} to {destination_name} works and the information shown is complete enough to review the route.")
     elif route_blocked_low_balance:
-        summary.append("The route was blocked before quote review because no eligible funded source chain was available for this destination.")
+        summary.append(
+            f"Review swap stayed disabled because the selected source balance is below FastBridge's "
+            f"${MIN_SOURCE_FIAT_USD:.0f} minimum source fiat gate"
+            + (f" (observed ${source_fiat_usd:.2f})" if source_fiat_usd is not None else "")
+            + "."
+            if stopped_for_min_fiat
+            else "The route was blocked before quote review because no eligible funded source chain was available for this destination."
+        )
     else:
         summary.append("The tester did not capture a parseable settled quote, so quote correctness is unresolved rather than a product execution failure.")
-    if STOP_BEFORE_EXECUTION:
+    if IS_EXP_U04_RUN:
+        summary.append("UI-only mode stopped after EXP-U04 checks by design.")
+    elif STOP_BEFORE_EXECUTION:
         summary.append("Quote-only mode stopped before Swap now, so no live transaction was attempted by design.")
     elif bridge_successful:
         summary.append("The end-to-end bridge transaction completed successfully and the UI balance updated on the destination chain.")
@@ -2478,33 +2897,38 @@ def main():
     checkpoints = [
         {
             "label": "Landing page and wallet state",
-            "status": "PASS" if total_usdc else "FAIL",
+            "status": "PASS" if (IS_EXP_U04_RUN and exp_u04_ready) or total_usdc else "FAIL",
             "evidence": initial["screenshot"],
-            "notes": f"Unified balance shown as {total_usdc} {ASSET_SYMBOL}." if total_usdc else "Unified balance did not load.",
+            "notes": (
+                "Connected Send / Exact In UI validated for EXP-U04."
+                if IS_EXP_U04_RUN and exp_u04_ready
+                else f"Unified balance shown as {total_usdc} {ASSET_SYMBOL}." if total_usdc
+                else ("EXP-U04 connected Send / Exact In UI was not observed." if IS_EXP_U04_RUN else "Unified balance did not load.")
+            ),
         },
         {
             "label": "Balance breakdown panel",
-            "status": "PASS" if breakdown_rows else "FAIL",
+            "status": "NA" if IS_EXP_U04_RUN else ("PASS" if breakdown_rows else "FAIL"),
             "evidence": breakdown.get("screenshot", initial["screenshot"]),
-            "notes": f"{len(breakdown_rows)} per-chain entries captured." if breakdown_rows else "Per-chain balance breakdown did not appear.",
+            "notes": "Not in scope for EXP-U04 UI-only scenario." if IS_EXP_U04_RUN else (f"{len(breakdown_rows)} per-chain entries captured." if breakdown_rows else "Per-chain balance breakdown did not appear."),
         },
         {
             "label": "Quote rendering",
-            "status": "PASS" if quote_parsed else harness_outcome,
+            "status": "NA" if IS_EXP_U04_RUN else ("PASS" if quote_parsed else harness_outcome),
             "evidence": quote_evidence,
-            "notes": f"Spend {initial_quote.get('amountSpent')}, receive {initial_quote.get('amountReceived')}, fees {initial_quote.get('totalFees')}." if quote_parsed else f"Quote parse incomplete: {', '.join(initial_quote.get('parseErrors') or ['unknown'])}.",
+            "notes": "Not in scope for EXP-U04 UI-only scenario." if IS_EXP_U04_RUN else (f"Spend {initial_quote.get('amountSpent')}, receive {initial_quote.get('amountReceived')}, fees {initial_quote.get('totalFees')}." if quote_parsed else f"Quote parse incomplete: {', '.join(initial_quote.get('parseErrors') or ['unknown'])}."),
         },
         {
             "label": "Allowance review",
-            "status": "NA" if STOP_BEFORE_EXECUTION else ("PASS" if "Set Token Allowances" in allowance["text"] or "Swap now" in review.get("text", "") or execution_attempted else ("HARNESS_TIMEOUT" if product_outcome == "UNKNOWN" else "PARTIAL")),
+            "status": "NA" if STOP_BEFORE_EXECUTION or IS_EXP_U04_RUN else ("PASS" if "Set Token Allowances" in allowance["text"] or "Swap now" in review.get("text", "") or execution_attempted else ("HARNESS_TIMEOUT" if product_outcome == "UNKNOWN" else "PARTIAL")),
             "evidence": allowance.get("screenshot", review.get("screenshot", after_amount["screenshot"])),
-            "notes": "Quote-only mode stopped before Swap now." if STOP_BEFORE_EXECUTION else ("Allowance modal rendered with approval options." if "Set Token Allowances" in allowance["text"] else ("Swap now execution was attempted." if execution_attempted else "Allowance / Swap now continuation was not observed in this run.")),
+            "notes": "UI-only / quote-only mode stopped before Swap now." if STOP_BEFORE_EXECUTION or IS_EXP_U04_RUN else ("Allowance modal rendered with approval options." if "Set Token Allowances" in allowance["text"] else ("Swap now execution was attempted." if execution_attempted else "Allowance / Swap now continuation was not observed in this run.")),
         },
         {
             "label": "Execution completion",
-            "status": "NA" if STOP_BEFORE_EXECUTION else ("PASS" if bridge_successful else ("LOW_BALANCE" if product_outcome == "LOW_BALANCE" else ("FAIL" if product_outcome == "PRODUCT_FAIL" else "HARNESS_TIMEOUT"))),
+            "status": "NA" if STOP_BEFORE_EXECUTION or IS_EXP_U04_RUN else ("PASS" if bridge_successful else ("LOW_BALANCE" if product_outcome == "LOW_BALANCE" else ("FAIL" if product_outcome == "PRODUCT_FAIL" else "HARNESS_TIMEOUT"))),
             "evidence": final_state["screenshot"],
-            "notes": "Quote-only mode stopped before execution by design." if STOP_BEFORE_EXECUTION else ("Bridge successful state rendered with final amounts and explorer link." if bridge_successful else "Bridge did not reach a successful completion state."),
+            "notes": "UI-only / quote-only mode stopped before execution by design." if STOP_BEFORE_EXECUTION or IS_EXP_U04_RUN else ("Bridge successful state rendered with final amounts and explorer link." if bridge_successful else "Bridge did not reach a successful completion state."),
         },
     ]
 
@@ -2530,15 +2954,17 @@ def main():
         {
             "id": "EXP-T04",
             "name": "Quote appears within 5s",
-            "status": "PASS" if quote_parsed and quote_visible_ms is not None and quote_visible_ms <= 5000 else ("ANOMALY" if quote_parsed else harness_outcome),
-            "notes": f"Measured {quote_visible_ms} ms." if quote_parsed and quote_visible_ms is not None else "A settled quote was not captured before timeout.",
+            "status": "NA" if IS_EXP_U04_RUN else ("PASS" if quote_parsed and quote_visible_ms is not None and quote_visible_ms <= 5000 else ("ANOMALY" if quote_parsed else harness_outcome)),
+            "notes": "Not in scope for EXP-U04 UI-only scenario." if IS_EXP_U04_RUN else (f"Measured {quote_visible_ms} ms." if quote_parsed and quote_visible_ms is not None else "A settled quote was not captured before timeout."),
         },
         {
             "id": "EXP-T05",
             "name": "Change in entered amount",
-            "status": "PASS" if ui_responsive_after_change else ("FAIL" if amount_change_ms is not None else "NA"),
+            "status": "NA" if IS_EXP_U04_RUN else ("PASS" if ui_responsive_after_change else ("FAIL" if amount_change_ms is not None else "NA")),
             "notes": (
-                f"Input remained responsive after amount change ({amount_change_ms} ms)."
+                "Not in scope for EXP-U04 UI-only scenario."
+                if IS_EXP_U04_RUN
+                else f"Input remained responsive after amount change ({amount_change_ms} ms)."
                 if ui_responsive_after_change
                 else "Input was unresponsive or disabled after changing the amount." if amount_change_ms is not None
                 else "Amount change could not be tested."
@@ -2548,12 +2974,15 @@ def main():
             "id": "EXP-T06",
             "name": "Change in entered amount and fetching of quote",
             "status": (
-                "PASS" if mid_fetch_input_enabled and mid_fetch_refetch_started
+                "NA" if IS_EXP_U04_RUN
+                else "PASS" if mid_fetch_input_enabled and mid_fetch_refetch_started
                 else "FAIL" if mid_fetch_input_enabled is not None
                 else "NA"
             ),
             "notes": (
-                "Input stayed enabled and re-fetch triggered after mid-fetch amount change."
+                "Not in scope for EXP-U04 UI-only scenario."
+                if IS_EXP_U04_RUN
+                else "Input stayed enabled and re-fetch triggered after mid-fetch amount change."
                 if mid_fetch_input_enabled and mid_fetch_refetch_started
                 else "Input was disabled during quote fetch." if mid_fetch_input_enabled is False
                 else "Re-fetch did not start after mid-fetch amount change." if mid_fetch_input_enabled and not mid_fetch_refetch_started
@@ -2587,20 +3016,20 @@ def main():
         {
             "id": "EXP-D03",
             "name": "Unified balance and breakdown are visible",
-            "status": "PASS" if total_usdc and breakdown_rows else "PARTIAL",
-            "notes": f"Initial unified {total_usdc or 'unknown'} {ASSET_SYMBOL}; breakdown rows captured: {len(breakdown_rows)}.",
+            "status": "NA" if IS_EXP_U04_RUN else ("PASS" if total_usdc and breakdown_rows else "PARTIAL"),
+            "notes": "Not in scope for EXP-U04 UI-only scenario." if IS_EXP_U04_RUN else f"Initial unified {total_usdc or 'unknown'} {ASSET_SYMBOL}; breakdown rows captured: {len(breakdown_rows)}.",
         },
         {
             "id": "EXP-U02",
             "name": "Source chain visible before confirm",
-            "status": "PASS" if initial_quote.get("sourceSummary") else ("PARTIAL" if quote_parsed else harness_outcome),
-            "notes": f"Source summary: {initial_quote.get('sourceSummary') or 'missing'}.",
+            "status": "NA" if IS_EXP_U04_RUN else ("PASS" if initial_quote.get("sourceSummary") else ("PARTIAL" if quote_parsed else harness_outcome)),
+            "notes": "Not in scope for EXP-U04 UI-only scenario." if IS_EXP_U04_RUN else f"Source summary: {initial_quote.get('sourceSummary') or 'missing'}.",
         },
         {
             "id": "EXP-U01",
             "name": "Spend, receive, and fee details shown",
-            "status": "PASS" if quote_parsed else harness_outcome,
-            "notes": f"Spend {initial_quote.get('amountSpent')}, receive {initial_quote.get('amountReceived')}, fees {initial_quote.get('totalFees')}.",
+            "status": "NA" if IS_EXP_U04_RUN else ("PASS" if quote_parsed else harness_outcome),
+            "notes": "Not in scope for EXP-U04 UI-only scenario." if IS_EXP_U04_RUN else f"Spend {initial_quote.get('amountSpent')}, receive {initial_quote.get('amountReceived')}, fees {initial_quote.get('totalFees')}.",
         },
         {
             "id": "EXP-U03",
@@ -2610,11 +3039,11 @@ def main():
         },
         {
             "id": "EXP-U04",
-            "name": "Send view - Add assets",
-            "status": "PASS" if send_view_ready else "FAIL",
+            "name": "Exact In --> Send view --> Add assets",
+            "status": "PASS" if exp_u04_ready else "FAIL",
             "notes": (
-                "Connected Send view showed 'Swap and Bridge' with Send and Receive."
-                if send_view_ready
+                "Connected Send view showed 'Swap and Bridge' with Send and Receive, and the 'Exact In' tab was selected by default."
+                if exp_u04_ready
                 else (
                     "Missing after wallet connect: "
                     + ", ".join(
@@ -2623,6 +3052,7 @@ def main():
                             ("'Swap and Bridge' label", has_swap_and_bridge_label),
                             ("Send view", has_send_view),
                             ("Receive view", has_receive_view),
+                            ("'Exact In' tab selected by default", exact_in_selected),
                         )
                         if not present
                     )
@@ -2650,6 +3080,121 @@ def main():
                 )
                 if IS_EXP_U05_RUN
                 else "Not applicable unless FASTBRIDGE_SCENARIO=EXP-U05 (or ETH Base→Optimism config)."
+            ),
+        },
+        {
+            "id": "EXP-U06",
+            "name": "Send view - Add assets - USDC",
+            "status": (
+                "PASS"
+                if IS_EXP_U06_RUN and send_view_ready and (bridge_successful or (STOP_BEFORE_EXECUTION and quote_parsed))
+                else "LOW_BALANCE"
+                if IS_EXP_U06_RUN and route_blocked_low_balance
+                else "FAIL"
+                if IS_EXP_U06_RUN
+                else "NA"
+            ),
+            "notes": (
+                (
+                    f"Send view ready; bridged {BRIDGE_AMOUNT} {ASSET_SYMBOL} from {SOURCE_CHAIN or 'configured source'} to {destination_name}."
+                    if bridge_successful
+                    else f"Send view ready; quote captured for {BRIDGE_AMOUNT} {ASSET_SYMBOL} Base→Optimism in quote-only mode."
+                    if STOP_BEFORE_EXECUTION and quote_parsed
+                    else (
+                        f"Base USDC source balance ${source_fiat_usd:.2f} is below FastBridge's "
+                        f"${MIN_SOURCE_FIAT_USD:.0f} minimum, so Review swap stays disabled."
+                        if stopped_for_min_fiat and source_fiat_usd is not None
+                        else f"EXP-U06 run did not complete the {BRIDGE_AMOUNT} USDC Base→Optimism path."
+                    )
+                )
+                if IS_EXP_U06_RUN
+                else "Not applicable unless FASTBRIDGE_SCENARIO=EXP-U06 (or Exact In USDC Base→Optimism config)."
+            ),
+        },
+        {
+            "id": "EXP-U07",
+            "name": "Send view - Exact Out - USDC",
+            "status": (
+                "PASS"
+                if IS_EXP_U07_RUN
+                and send_view_ready
+                and exact_out_selected
+                and (bridge_successful or (STOP_BEFORE_EXECUTION and quote_parsed))
+                else "LOW_BALANCE"
+                if IS_EXP_U07_RUN and route_blocked_low_balance
+                else "FAIL"
+                if IS_EXP_U07_RUN
+                else "NA"
+            ),
+            "notes": (
+                (
+                    f"Exact Out selected; Receive {RECEIVE_ASSET} on {RECEIVE_CHAIN or 'Base'}; "
+                    f"bridged for amount {BRIDGE_AMOUNT} toward {destination_name}."
+                    if bridge_successful and exact_out_selected
+                    else (
+                        f"Exact Out selected; Receive {RECEIVE_ASSET} on {RECEIVE_CHAIN or 'Base'}; "
+                        f"quote captured for amount {BRIDGE_AMOUNT} in quote-only mode."
+                        if STOP_BEFORE_EXECUTION and quote_parsed and exact_out_selected
+                        else (
+                            f"Source balance ${source_fiat_usd:.2f} is below FastBridge's "
+                            f"${MIN_SOURCE_FIAT_USD:.0f} minimum, so Review swap stays disabled."
+                            if stopped_for_min_fiat and source_fiat_usd is not None
+                            else (
+                                "Exact Out tab was not selected."
+                                if not exact_out_selected
+                                else (
+                                    f"EXP-U07 run did not complete Exact Out receive "
+                                    f"{BRIDGE_AMOUNT} USDC on Base."
+                                )
+                            )
+                        )
+                    )
+                )
+                if IS_EXP_U07_RUN
+                else "Not applicable unless FASTBRIDGE_SCENARIO=EXP-U07 (Exact Out Receive Base USDC 0.1)."
+            ),
+        },
+        {
+            "id": "EXP-U08",
+            "name": "Send view - Exact Out - ETH",
+            "status": (
+                "PASS"
+                if IS_EXP_U08_RUN
+                and send_view_ready
+                and exact_out_selected
+                and (bridge_successful or (STOP_BEFORE_EXECUTION and quote_parsed))
+                else "LOW_BALANCE"
+                if IS_EXP_U08_RUN and route_blocked_low_balance
+                else "FAIL"
+                if IS_EXP_U08_RUN
+                else "NA"
+            ),
+            "notes": (
+                (
+                    f"Exact Out selected; Receive {RECEIVE_ASSET} on {RECEIVE_CHAIN or 'Base'}; "
+                    f"bridged for amount {BRIDGE_AMOUNT} toward {destination_name}."
+                    if bridge_successful and exact_out_selected
+                    else (
+                        f"Exact Out selected; Receive {RECEIVE_ASSET} on {RECEIVE_CHAIN or 'Base'}; "
+                        f"quote captured for amount {BRIDGE_AMOUNT} in quote-only mode."
+                        if STOP_BEFORE_EXECUTION and quote_parsed and exact_out_selected
+                        else (
+                            f"Source balance ${source_fiat_usd:.2f} is below FastBridge's "
+                            f"${MIN_SOURCE_FIAT_USD:.0f} minimum, so Review swap stays disabled."
+                            if stopped_for_min_fiat and source_fiat_usd is not None
+                            else (
+                                "Exact Out tab was not selected."
+                                if not exact_out_selected
+                                else (
+                                    f"EXP-U08 run did not complete Exact Out receive "
+                                    f"{BRIDGE_AMOUNT} ETH on Base."
+                                )
+                            )
+                        )
+                    )
+                )
+                if IS_EXP_U08_RUN
+                else "Not applicable unless FASTBRIDGE_SCENARIO=EXP-U08 (Exact Out Receive Base ETH 0.0001)."
             ),
         },
         {
@@ -2694,7 +3239,7 @@ def main():
 
     result = {
         "scenarioId": SCENARIO_ID or f"FB-{ASSET_SYMBOL}-{DESTINATION_SLUG.upper()}-001",
-        "executionMode": "quote-only" if STOP_BEFORE_EXECUTION else "full",
+        "executionMode": "ui-only" if IS_EXP_U04_RUN else ("quote-only" if STOP_BEFORE_EXECUTION else "full"),
         "status": result_status,
         "productOutcome": product_outcome,
         "harnessOutcome": harness_outcome,
@@ -2706,6 +3251,7 @@ def main():
         "address": account_address,
         "bridgeAmount": BRIDGE_AMOUNT,
         "assetSymbol": ASSET_SYMBOL,
+        "exactMode": EXACT_MODE,
         "sourceChain": SOURCE_CHAIN or None,
         "receiveAsset": RECEIVE_ASSET,
         "receiveChain": RECEIVE_CHAIN or None,
