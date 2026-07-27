@@ -166,6 +166,18 @@ EXPECTATION_CATALOG = [
         "category": "UI",
         "description": "If a user-facing action fails or the journey is blocked, the app should surface a clear, human-readable explanation and next step.",
     },
+    {
+        "id": "EXP-U04",
+        "name": "Transaction completes within 30 seconds",
+        "category": "UI",
+        "description": "A bridge transaction of any configured amount should complete successfully within 30 seconds.",
+    },
+    {
+        "id": "EXP-U05",
+        "name": "Transaction should be successful when the unified balance deducted from two source chains",
+        "category": "UI",
+        "description": "A transaction is performed with two source chains from unified balance to one destination",
+    },
 ]
 
 INIT_SCRIPT = r"""
@@ -1727,6 +1739,12 @@ def main():
         (step.get("screenshot") for step in step_log if step.get("label") == initial_quote.get("evidenceLabel")),
         after_amount["screenshot"],
     )
+    source_chains_used: List[str] = []
+    raw_sources = completion.get("sourceChains") or ""
+    for piece in re.split(r"\s*(?:,|;|/|\band\b|&|\+)\s*", raw_sources):
+        chain = piece.strip()
+        if chain and chain not in source_chains_used:
+            source_chains_used.append(chain)
 
     if total_usdc and "View Balance Breakdown" in initial["text"]:
         worked.append(f"Unified balance loaded in the live UI and surfaced a total of {total_usdc} USDC.")
@@ -2010,6 +2028,50 @@ def main():
             "name": "Error messages are user-readable",
             "status": "FAIL" if user_facing_error_seen else "PASS",
             "notes": "A user-facing failure banner was shown, but it did not explain the specific cause or recovery path." if user_facing_error_seen else "No user-facing action failure was observed in this run.",
+        },
+        {
+            "id": "EXP-U04",
+            "name": "Transaction completes within 30 seconds",
+            "status": "NA" if STOP_BEFORE_EXECUTION else (
+                "PASS"
+                if bridge_successful
+                and execution_completion_ms is not None
+                and execution_completion_ms <= 30000
+                else "ANOMALY"
+                if bridge_successful and execution_completion_ms is not None
+                else "LOW_BALANCE"
+                if product_outcome == "LOW_BALANCE"
+                else "FAIL"
+                if product_outcome == "PRODUCT_FAIL"
+                else "HARNESS_TIMEOUT"
+            ),
+            "notes": (
+                "Quote-only mode stopped before execution by design."
+                if STOP_BEFORE_EXECUTION
+                else f"Configured amount {BRIDGE_AMOUNT} USDC completed in {execution_completion_ms} ms."
+                if bridge_successful and execution_completion_ms is not None
+                else "Bridge completed, but execution timing was not captured."
+                if bridge_successful
+                else "Bridge did not complete; amount size is not part of this expectation."
+            ),
+        },
+        {
+            "id": "EXP-U05",
+            "name": "Transaction should be successful when the unified balance deducted from two source chains",
+            "status": (
+                "PASS"
+                if bridge_successful and len(source_chains_used) >= 2
+                else "FAIL"
+                if bridge_successful
+                else "NA"
+            ),
+            "notes": (
+                f"Bridge succeeded and drew from {len(source_chains_used)} source chains: {', '.join(source_chains_used)}."
+                if bridge_successful and len(source_chains_used) >= 2
+                else f"Bridge succeeded but only drew from {len(source_chains_used)} source chain(s): {', '.join(source_chains_used) or 'unknown'}."
+                if bridge_successful
+                else "Run did not complete, so multi-source deduction could not be evaluated."
+            ),
         },
         {
             "id": "EXP-T01",
