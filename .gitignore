@@ -5,3 +5,7 @@ __pycache__/
 .cursor
 .idea
 fastbridge-report-artifacts/
+.venv/
+fastbridge-report-artifacts/web3modal-400-repro/
+fastbridge-report-artifacts/exact-out-probe.png
+web3modal-400-repro-*/
