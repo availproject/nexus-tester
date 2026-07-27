@@ -79,3 +79,15 @@ Each bundle contains:
 - `assets/`
 
 The HTML report embeds screenshots directly, so the folder can be zipped and shared as-is.
+
+## Scheduled CI Runs
+
+The `.github/workflows/scheduled-fastbridge-tests.yml` workflow runs the harness automatically every Monday at `00:00 UTC` (and on manual `workflow_dispatch`). For each run:
+
+- A matrix job executes the test against each destination chain — `arbitrum`, `ethereum`, `megaeth`, `base`, `monad` — with `FASTBRIDGE_BRIDGE_AMOUNT=0.1`.
+- Each timestamped report bundle is uploaded as a workflow artifact (retained 30 days).
+- After every run, the per-chain `fastbridge-report-artifacts/<slug>-latest/` snapshot is committed back to the branch so the most recent report for each destination is always browsable in the repo.
+
+Required repository secret:
+
+- `FASTBRIDGE_TEST_PRIVATE_KEY` — private key for the funded test wallet used by the harness.

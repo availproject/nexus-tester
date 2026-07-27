@@ -1,0 +1,144 @@
+name: Scheduled FastBridge Tests
+
+on:
+  schedule:
+    - cron: "0 0 * * 1"
+  workflow_dispatch:
+    inputs:
+      bridge_amount:
+        description: "Bridge amount in USDC (overrides default 0.1)"
+        required: false
+        default: "0.1"
+
+concurrency:
+  group: scheduled-fastbridge-tests
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Bridge to ${{ matrix.dest_slug }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        dest_slug:
+          - arbitrum
+          - ethereum
+          - megaeth
+          - base
+          - monad
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run FastBridge UI test
+        env:
+          FASTBRIDGE_DEST_SLUG: ${{ matrix.dest_slug }}
+          FASTBRIDGE_BRIDGE_AMOUNT: ${{ github.event.inputs.bridge_amount || '0.1' }}
+          FASTBRIDGE_TEST_PRIVATE_KEY: ${{ secrets.FASTBRIDGE_TEST_PRIVATE_KEY }}
+          PYTHONUNBUFFERED: "1"
+        run: python3 ui_fastbridge_connect_test.py
+
+      - name: Sync run into <slug>-latest folder
+        if: always()
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          latest_run=$(ls -1dt fastbridge-report-artifacts/fastbridge-report-* 2>/dev/null | head -n 1 || true)
+          if [ -z "${latest_run}" ]; then
+            echo "No report bundle was produced; skipping latest sync."
+            exit 0
+          fi
+          target="fastbridge-report-artifacts/${{ matrix.dest_slug }}-latest"
+          rm -rf "${target}"
+          mkdir -p "${target}"
+          cp -R "${latest_run}/." "${target}/"
+          echo "Synced ${latest_run} -> ${target}"
+
+      - name: Upload timestamped report bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastbridge-report-${{ matrix.dest_slug }}-${{ github.run_id }}
+          path: fastbridge-report-artifacts/fastbridge-report-*/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload <slug>-latest snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastbridge-${{ matrix.dest_slug }}-latest-${{ github.run_id }}
+          path: fastbridge-report-artifacts/${{ matrix.dest_slug }}-latest/
+          if-no-files-found: warn
+          retention-days: 90
+
+  publish-reports:
+    name: Commit updated <slug>-latest reports
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download all <slug>-latest snapshots
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fastbridge-*-latest-${{ github.run_id }}
+          path: _downloaded_latest
+
+      - name: Move snapshots into fastbridge-report-artifacts
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir -p fastbridge-report-artifacts
+          for dir in _downloaded_latest/fastbridge-*-latest-${{ github.run_id }}; do
+            [ -d "${dir}" ] || continue
+            base=$(basename "${dir}")
+            slug=${base#fastbridge-}
+            slug=${slug%-latest-${{ github.run_id }}}
+            target="fastbridge-report-artifacts/${slug}-latest"
+            rm -rf "${target}"
+            mkdir -p "${target}"
+            cp -R "${dir}/." "${target}/"
+            echo "Restored ${target}"
+          done
+          rm -rf _downloaded_latest
+
+      - name: Commit and push updated reports
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add fastbridge-report-artifacts/*-latest || true
+          if git diff --staged --quiet; then
+            echo "No report changes to commit."
+            exit 0
+          fi
+          run_date=$(date -u +'%Y-%m-%d')
+          git commit -m "chore(reports): refresh fastbridge <slug>-latest snapshots ${run_date}"
+          git push origin HEAD:${GITHUB_REF#refs/heads/}
