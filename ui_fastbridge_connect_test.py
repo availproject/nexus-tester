@@ -17,13 +17,17 @@ from eth_account.messages import encode_defunct
 from playwright.sync_api import BrowserContext, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 from web3 import Web3
 
+from fastbridge_scenarios import resolve_run_config
+
 
 WORKSPACE = Path(__file__).resolve().parent
 ARTIFACTS_DIR = WORKSPACE / "fastbridge-report-artifacts"
 ARTIFACTS_DIR.mkdir(exist_ok=True)
 
 RUN_ID = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-DESTINATION_SLUG = os.environ.get("FASTBRIDGE_DEST_SLUG", "base").strip().strip("/")
+RUN_CONFIG = resolve_run_config(os.environ)
+SCENARIO_ID = RUN_CONFIG.scenario_id or ""
+DESTINATION_SLUG = RUN_CONFIG.destination_slug
 RUNS_TO_KEEP = 5  # Option C: max timestamped runs kept per chain
 
 # Combined A + B + C layout:
@@ -74,135 +78,22 @@ def prune_old_runs(runs_dir: Path, keep: int) -> None:
     for old_dir in run_dirs[:-keep] if len(run_dirs) > keep else []:
         shutil.rmtree(old_dir, ignore_errors=True)
 
-SCENARIO_ID = os.environ.get("FASTBRIDGE_SCENARIO", "").strip().upper()
-SCENARIO_DEFAULTS = {
-    "EXP-U04": {
-        "dest": "base",
-        "amount": "0.1",
-        "asset": "USDC",
-    },
-    "EXP-U05": {
-        "dest": "optimism",
-        "amount": "0.0001",
-        "asset": "ETH",
-        "source_chain": "Base",
-        "receive_asset": "ETH",
-        "receive_chain": "Optimism",
-    },
-    "EXP-U06": {
-        "dest": "optimism",
-        "amount": "0.1",
-        "asset": "USDC",
-        "source_chain": "Base",
-        "receive_asset": "USDC",
-        "receive_chain": "Optimism",
-        "exact_mode": "in",
-    },
-    "EXP-U07": {
-        "dest": "base",
-        "amount": "0.1",
-        "asset": "USDC",
-        "source_chain": "",
-        "receive_asset": "USDC",
-        "receive_chain": "Base",
-        "exact_mode": "out",
-    },
-    "EXP-U08": {
-        "dest": "base",
-        "amount": "0.0001",
-        "asset": "ETH",
-        "source_chain": "",
-        "receive_asset": "ETH",
-        "receive_chain": "Base",
-        "exact_mode": "out",
-    },
-}
-_scenario = SCENARIO_DEFAULTS.get(SCENARIO_ID, {})
-DESTINATION_SLUG = os.environ.get("FASTBRIDGE_DEST_SLUG", _scenario.get("dest", "base")).strip().strip("/")
 BASE_URL = f"https://fastbridge.availproject.org/{DESTINATION_SLUG}/"
-BRIDGE_AMOUNT = os.environ.get("FASTBRIDGE_BRIDGE_AMOUNT", _scenario.get("amount", "0.1")).strip()
-ASSET_SYMBOL = os.environ.get("FASTBRIDGE_ASSET", _scenario.get("asset", "USDC")).strip().upper() or "USDC"
-SOURCE_CHAIN = os.environ.get("FASTBRIDGE_SOURCE_CHAIN", _scenario.get("source_chain", "")).strip()
-RECEIVE_ASSET = (
-    os.environ.get("FASTBRIDGE_RECEIVE_ASSET", _scenario.get("receive_asset", ASSET_SYMBOL)).strip().upper()
-    or ASSET_SYMBOL
-)
-RECEIVE_CHAIN = os.environ.get("FASTBRIDGE_RECEIVE_CHAIN", _scenario.get("receive_chain", "")).strip()
-_exact_mode_raw = os.environ.get("FASTBRIDGE_EXACT_MODE", _scenario.get("exact_mode", "in")).strip().lower()
-EXACT_MODE = "out" if _exact_mode_raw in {"out", "exact_out", "exact-out"} else "in"
-if SCENARIO_ID == "EXP-U07":
-    # Scenario wins over leftover FASTBRIDGE_* env overrides from other runs.
-    EXACT_MODE = "out"
-    DESTINATION_SLUG = "base"
-    BASE_URL = f"https://fastbridge.availproject.org/{DESTINATION_SLUG}/"
-    BRIDGE_AMOUNT = os.environ.get("FASTBRIDGE_BRIDGE_AMOUNT", _scenario.get("amount", "0.1")).strip() or "0.1"
-    ASSET_SYMBOL = "USDC"
-    RECEIVE_ASSET = "USDC"
-    RECEIVE_CHAIN = "Base"
-    SOURCE_CHAIN = ""
-elif SCENARIO_ID == "EXP-U08":
-    EXACT_MODE = "out"
-    DESTINATION_SLUG = "base"
-    BASE_URL = f"https://fastbridge.availproject.org/{DESTINATION_SLUG}/"
-    BRIDGE_AMOUNT = os.environ.get("FASTBRIDGE_BRIDGE_AMOUNT", _scenario.get("amount", "0.0001")).strip() or "0.0001"
-    ASSET_SYMBOL = "ETH"
-    RECEIVE_ASSET = "ETH"
-    RECEIVE_CHAIN = "Base"
-    SOURCE_CHAIN = ""
-elif SCENARIO_ID == "EXP-U06":
-    EXACT_MODE = "in"
-    DESTINATION_SLUG = "optimism"
-    BASE_URL = f"https://fastbridge.availproject.org/{DESTINATION_SLUG}/"
-    BRIDGE_AMOUNT = os.environ.get("FASTBRIDGE_BRIDGE_AMOUNT", _scenario.get("amount", "0.1")).strip() or "0.1"
-    ASSET_SYMBOL = "USDC"
-    RECEIVE_ASSET = "USDC"
-    RECEIVE_CHAIN = "Optimism"
-    SOURCE_CHAIN = "Base"
-STOP_BEFORE_EXECUTION = os.environ.get("FASTBRIDGE_STOP_BEFORE_EXECUTION", "").strip().lower() in {"1", "true", "yes", "quote", "review"}
+BRIDGE_AMOUNT = RUN_CONFIG.amount
+ASSET_SYMBOL = RUN_CONFIG.asset_symbol
+SOURCE_CHAIN = RUN_CONFIG.source_chain
+RECEIVE_ASSET = RUN_CONFIG.receive_asset
+RECEIVE_CHAIN = RUN_CONFIG.receive_chain
+EXACT_MODE = RUN_CONFIG.exact_mode
+STOP_BEFORE_EXECUTION = RUN_CONFIG.stop_before_execution
 QUOTE_READY_TIMEOUT_MS = int(os.environ.get("FASTBRIDGE_QUOTE_READY_TIMEOUT_MS", "15000"))
 NAVIGATION_TIMEOUT_MS = int(os.environ.get("FASTBRIDGE_NAVIGATION_TIMEOUT_MS", "45000"))
 POST_LOAD_NETWORK_IDLE_TIMEOUT_MS = int(os.environ.get("FASTBRIDGE_POST_LOAD_NETWORK_IDLE_TIMEOUT_MS", "10000"))
-IS_EXP_U04_RUN = SCENARIO_ID == "EXP-U04"
-IS_EXP_U08_RUN = SCENARIO_ID == "EXP-U08" or (
-    SCENARIO_ID not in {"EXP-U04", "EXP-U05", "EXP-U06", "EXP-U07"}
-    and EXACT_MODE == "out"
-    and ASSET_SYMBOL == "ETH"
-    and DESTINATION_SLUG == "base"
-    and RECEIVE_ASSET == "ETH"
-    and RECEIVE_CHAIN.lower() == "base"
-)
-IS_EXP_U07_RUN = SCENARIO_ID == "EXP-U07" or (
-    SCENARIO_ID not in {"EXP-U04", "EXP-U05", "EXP-U06", "EXP-U08"}
-    and not IS_EXP_U08_RUN
-    and EXACT_MODE == "out"
-    and ASSET_SYMBOL == "USDC"
-    and DESTINATION_SLUG == "base"
-    and RECEIVE_ASSET == "USDC"
-    and RECEIVE_CHAIN.lower() == "base"
-)
-IS_EXP_U05_RUN = SCENARIO_ID == "EXP-U05" or (
-    SCENARIO_ID not in {"EXP-U04", "EXP-U07", "EXP-U08"}
-    and not IS_EXP_U08_RUN
-    and EXACT_MODE == "in"
-    and ASSET_SYMBOL == "ETH"
-    and SOURCE_CHAIN.lower() == "base"
-    and DESTINATION_SLUG in {"optimism", "op-mainnet"}
-    and RECEIVE_ASSET == "ETH"
-)
-IS_EXP_U06_RUN = SCENARIO_ID == "EXP-U06" or (
-    SCENARIO_ID not in {"EXP-U04", "EXP-U05", "EXP-U07", "EXP-U08"}
-    and not IS_EXP_U07_RUN
-    and not IS_EXP_U08_RUN
-    and EXACT_MODE == "in"
-    and ASSET_SYMBOL == "USDC"
-    and SOURCE_CHAIN.lower() == "base"
-    and DESTINATION_SLUG in {"optimism", "op-mainnet"}
-    and RECEIVE_ASSET == "USDC"
-    and RECEIVE_CHAIN.lower() == "optimism"
-)
-# EXP-U04 is a UI-only scenario: stop after connected Send / Exact In checks.
-if IS_EXP_U04_RUN:
-    STOP_BEFORE_EXECUTION = True
+IS_EXP_U04_RUN = RUN_CONFIG.is_scenario("EXP-U04")
+IS_EXP_U05_RUN = RUN_CONFIG.is_scenario("EXP-U05")
+IS_EXP_U06_RUN = RUN_CONFIG.is_scenario("EXP-U06")
+IS_EXP_U07_RUN = RUN_CONFIG.is_scenario("EXP-U07")
+IS_EXP_U08_RUN = RUN_CONFIG.is_scenario("EXP-U08")
 
 CHAIN_CONFIG = {
     1: {"name": "Ethereum", "rpc": "https://1rpc.io/eth"},
@@ -1420,6 +1311,7 @@ def build_report_markdown(result: Dict[str, Any]) -> str:
     lines.append("# FastBridge QA Dashboard")
     lines.append("")
     lines.append(f"- Scenario ID: `{result['scenarioId']}`")
+    lines.append(f"- Run kind: `{result.get('executionKind', 'scenario')}`")
     lines.append(f"- Status: `{result['status']}`")
     lines.append(f"- Execution mode: `{result.get('executionMode', 'full')}`")
     lines.append(f"- Product outcome: `{result.get('productOutcome', 'unknown')}`")
@@ -1430,8 +1322,8 @@ def build_report_markdown(result: Dict[str, Any]) -> str:
     lines.append(f"- App URL: `{result['appUrl']}`")
     lines.append(f"- Wallet: `{result['address']}`")
     lines.append(f"- Destination chain tested: `{result['destinationName']}`")
-    lines.append(f"- Destination token tested: `USDC`")
-    lines.append(f"- Transfer amount tested: `{result['bridgeAmount']} USDC`")
+    lines.append(f"- Destination token tested: `{result['receiveAsset']}`")
+    lines.append(f"- Transfer amount tested: `{result['bridgeAmount']} {result['assetSymbol']}`")
     lines.append(f"- Bridge completed: `{result['bridgeSuccessful']}`")
     lines.append(f"- Gasless flow detected: `{result['usedGaslessFlow']}`")
     lines.append(f"- Transactions submitted: `{len(result['txLog'])}`")
@@ -1448,8 +1340,9 @@ def build_report_markdown(result: Dict[str, Any]) -> str:
     lines.append("| Field | Value |")
     lines.append("| --- | --- |")
     lines.append(f"| Scenario | `{result['scenarioId']}` |")
+    lines.append(f"| Run kind | `{result.get('executionKind', 'scenario')}` |")
     lines.append(f"| Destination | `{result['destinationName']}` |")
-    lines.append(f"| Requested output | `{result['bridgeAmount']} USDC` |")
+    lines.append(f"| Requested output | `{result['bridgeAmount']} {result['receiveAsset']}` |")
     lines.append(f"| Execution mode | `{result.get('executionMode', 'full')}` |")
     lines.append(f"| Product outcome | `{result.get('productOutcome', 'unknown')}` |")
     lines.append(f"| Harness outcome | `{result.get('harnessOutcome', 'unknown')}` |")
@@ -2007,6 +1900,7 @@ def build_report_html(result: Dict[str, Any]) -> str:
     <h2>Scenario Outcome</h2>
     <table>
       <tr><th>Field</th><th>Value</th></tr>
+      <tr><td>Run kind</td><td>{html.escape(result.get("executionKind", "scenario"))}</td></tr>
       <tr><td>Execution mode</td><td>{html.escape(result.get("executionMode", "full"))}</td></tr>
       <tr><td>Product outcome</td><td>{html.escape(result.get("productOutcome", "unknown"))}</td></tr>
       <tr><td>Harness outcome</td><td>{html.escape(result.get("harnessOutcome", "unknown"))}</td></tr>
@@ -3079,7 +2973,7 @@ def main():
                     else f"EXP-U05 run did not complete the {BRIDGE_AMOUNT} ETH Base→Optimism path."
                 )
                 if IS_EXP_U05_RUN
-                else "Not applicable unless FASTBRIDGE_SCENARIO=EXP-U05 (or ETH Base→Optimism config)."
+                else "Not applicable unless FASTBRIDGE_SCENARIO=EXP-U05."
             ),
         },
         {
@@ -3108,7 +3002,7 @@ def main():
                     )
                 )
                 if IS_EXP_U06_RUN
-                else "Not applicable unless FASTBRIDGE_SCENARIO=EXP-U06 (or Exact In USDC Base→Optimism config)."
+                else "Not applicable unless FASTBRIDGE_SCENARIO=EXP-U06."
             ),
         },
         {
@@ -3239,6 +3133,7 @@ def main():
 
     result = {
         "scenarioId": SCENARIO_ID or f"FB-{ASSET_SYMBOL}-{DESTINATION_SLUG.upper()}-001",
+        "executionKind": RUN_CONFIG.execution_kind,
         "executionMode": "ui-only" if IS_EXP_U04_RUN else ("quote-only" if STOP_BEFORE_EXECUTION else "full"),
         "status": result_status,
         "productOutcome": product_outcome,
@@ -3255,6 +3150,15 @@ def main():
         "sourceChain": SOURCE_CHAIN or None,
         "receiveAsset": RECEIVE_ASSET,
         "receiveChain": RECEIVE_CHAIN or None,
+        "resolvedConfig": {
+            "destinationSlug": DESTINATION_SLUG,
+            "amount": BRIDGE_AMOUNT,
+            "assetSymbol": ASSET_SYMBOL,
+            "sourceChain": SOURCE_CHAIN or None,
+            "receiveAsset": RECEIVE_ASSET,
+            "receiveChain": RECEIVE_CHAIN or None,
+            "exactMode": EXACT_MODE,
+        },
         "summary": summary,
         "worked": worked,
         "issues": issues,

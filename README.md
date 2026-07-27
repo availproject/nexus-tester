@@ -33,6 +33,18 @@ To change the bridge amount:
 FASTBRIDGE_DEST_SLUG=avalanche FASTBRIDGE_BRIDGE_AMOUNT=0.1 python3 ui_fastbridge_connect_test.py
 ```
 
+To run a canonical QA scenario:
+
+```bash
+FASTBRIDGE_SCENARIO=EXP-U07 python3 ui_fastbridge_connect_test.py
+```
+
+Named scenarios (`EXP-U04` through `EXP-U08`) use fixed, reproducible route
+configuration. Do not combine them with route-changing `FASTBRIDGE_*` settings
+(destination, amount, assets, chains, or exact mode); the harness rejects a
+conflict before execution. Omit `FASTBRIDGE_SCENARIO` for a custom run. Custom
+runs are deliberately not reported as one of the named QA scenarios.
+
 To pass the private key via environment variable instead of prompt:
 
 ```bash
@@ -59,6 +71,8 @@ FASTBRIDGE_TEST_ADDRESS=0xYourAddress python3 check_fastbridge_tokens.py
   Example: `base`, `polygon`, `scroll`, `avalanche`
 - `FASTBRIDGE_BRIDGE_AMOUNT`
   Example: `0.1`
+- `FASTBRIDGE_SCENARIO`
+  Optional canonical scenario ID: `EXP-U04`, `EXP-U05`, `EXP-U06`, `EXP-U07`, or `EXP-U08`. Named scenarios reject conflicting route overrides.
 - `FASTBRIDGE_TEST_PRIVATE_KEY`
   If omitted, the main test script prompts for it securely
 - `FASTBRIDGE_TEST_ADDRESS`
